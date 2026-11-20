@@ -19,6 +19,7 @@ from engine.parser.sql_parser import Parser
 import config
 import ingesta
 import recomendador
+import visuales
 from evaluacion import evaluar
 
 
@@ -188,7 +189,9 @@ def main():
                 assert hib["recomendaciones"][0]["id"] == 2
                 assert len(hib["recomendaciones"][0]["posiciones"]) >= 2
                 assert hib["recomendaciones"][0]["aportes"]
-                assert {"cocompra_ms", "visual_ms", "texto_ms", "metadata_ms"} <= set(hib["tiempos"])
+                # El híbrido solo consulta las señales con peso > 0.
+                con_peso = {f"{s}_ms" for s, w in config.PESOS_DEFECTO.items() if w > 0}
+                assert con_peso == set(hib["tiempos"]), hib["tiempos"]
                 assert "espacial_ms" not in hib["tiempos"] and hib["sucursales_knn"] == []
 
                 hib_callao = recomendador.recomendar(
@@ -226,16 +229,27 @@ def main():
                 assert hib_rrf["recomendaciones"][0]["id"] == 2
                 assert hib_rrf["recomendaciones"][0]["aportes"]
 
-                cold_hib = recomendador.recomendar(1, modo="hibrido", k=5, max_usuario_id=0, fusion="score")
-                assert recomendador.cocompra(1, k=5, max_usuario_id=0) == []
+                todos = set(range(1, 7))
+                cold_hib = recomendador.recomendar(1, modo="hibrido", k=5, usuarios_excluidos=todos, fusion="score")
+                assert recomendador.cocompra(1, k=5, usuarios_excluidos=todos) == []
                 assert cold_hib["recomendaciones"] and all(
                     "cocompra" not in r["posiciones"] for r in cold_hib["recomendaciones"]
                 )
 
-                sin_fuga = recomendador.cocompra(1, k=10, max_usuario_id=4)
+                # Excluir usuarios no contiguos: sin el 5 (único que compró 1 y 6) desaparece el 6.
+                sin_fuga = recomendador.cocompra(1, k=10, usuarios_excluidos={2, 5})
                 assert {r["id"] for r in sin_fuga} == {2, 3}
-                con_fuga = recomendador.cocompra(1, k=10, max_usuario_id=None)
+                con_fuga = recomendador.cocompra(1, k=10, usuarios_excluidos=None)
                 assert 6 in {r["id"] for r in con_fuga}
+
+                # Consulta solo de stopwords: el motor responde vacío, no error (texto() ya no oculta errores).
+                assert recomendador.texto("the and of", k=3) == []
+                with patch("cliente_bd.ejecutar", side_effect=recomendador.bd.ErrorMotor("caído")):
+                    try:
+                        recomendador.texto("wireless controller", k=3)
+                        raise AssertionError("texto() debió propagar ErrorMotor")
+                    except recomendador.bd.ErrorMotor:
+                        pass
 
                 plan_ord = ejecutar_local(
                     f"EXPLAIN ANALYZE SELECT o2.item_id, COUNT(*) FROM {config.TABLA_ORDENES} AS o1 "
@@ -275,6 +289,41 @@ def main():
                 assert res_img["productos"][0]["id"] == 1
                 assert res_img["productos"][0]["puntaje"] > 0.99
 
+                # sift4096 por la app: vocabulario de prueba (el de 256 palabras del repo, mismo extractor)
+                tfidf_prueba = Path(dir_eval) / "tfidf_catalogo.json"
+                try:
+                    with patch.object(visuales, "RUTA_VOCABULARIO_SIFT4096",
+                                      RAIZ_PROYECTO / "data" / "modelos" / "fotos" / "vocabulary.json"), \
+                            patch.object(visuales, "RUTA_TFIDF_SIFT4096", tfidf_prueba), \
+                            patch.object(visuales, "CARPETA_MULTIMEDIA", media), \
+                            patch.object(ingesta, "CARPETA_MULTIMEDIA", media):
+                        visuales._cache.clear()
+                        ingesta.cargar_visuales(["sift4096"])
+                        assert "sift4096" in visuales.modelos_instalados()
+                        tabla_vis = config.TABLAS_VISUALES["sift4096"]
+                        assert [r["id"] for r in ejecutar_local(f"SELECT id FROM {tabla_vis} ORDER BY id;")["rows"]] == [1, 2, 3, 4, 5, 6]
+                        img_4096 = recomendador.buscar_imagen(productos[0]["imagen"], k=3, modelo_visual="sift4096")
+                        assert img_4096["productos"][0]["id"] == 1 and img_4096["productos"][0]["puntaje"] > 0.99
+                        vis_4096 = recomendador.recomendar(
+                            1, modo="visual", k=5, modelo_visual="sift4096", filtros={"categoria": "Controllers"}
+                        )
+                        ids_4096 = [r["id"] for r in vis_4096["recomendaciones"]]
+                        assert ids_4096 and 1 not in ids_4096
+                        assert all(r["categoria"] == "Controllers" for r in vis_4096["recomendaciones"])
+                        hib_4096 = recomendador.recomendar(1, modo="hibrido", k=5, modelo_visual="sift4096")
+                        assert any("visual" in r["posiciones"] for r in hib_4096["recomendaciones"])
+                finally:
+                    visuales._cache.clear()
+                for fn, kwargs in (
+                    (recomendador.recomendar, {"item_id": 1, "modelo_visual": "otro"}),
+                    (recomendador.buscar_imagen, {"ruta_relativa": productos[0]["imagen"], "modelo_visual": "otro"}),
+                ):
+                    try:
+                        fn(**kwargs)
+                        raise AssertionError("debió lanzar ValueError")
+                    except ValueError:
+                        pass
+
                 for fn, kwargs in ((recomendador.recomendar, {"item_id": 999}),):
                     try:
                         fn(**kwargs)
@@ -307,7 +356,7 @@ def main():
                 )
                 etiquetas = [e[0] for e in evaluar.ESTRATEGIAS_EVAL]
                 assert [r["modo"] for r in resumenes] == etiquetas
-                assert len(detalle) == len(etiquetas) * 2
+                assert len(detalle) % len(etiquetas) == 0 and detalle
                 with open(Path(dir_eval) / "resumen.csv", encoding="utf-8") as f:
                     filas_csv = list(csv.DictReader(f))
                 assert len(filas_csv) == 6
@@ -330,9 +379,24 @@ def main():
                 assert [l["operacion"] for l in latencias] == ["RTREE-radius", "RTREE-knn", "RTREE-polygon"]
                 for nombre in ("resumen_espacial.csv", "detalle_espacial.csv", "latencias_espaciales.csv"):
                     assert (Path(dir_eval) / nombre).exists()
+
+                calibracion = evaluar.calibrar_pesos(muestras=10, k=5, salida=Path(dir_eval), semilla=7, paso=0.25)
+                assert len(calibracion) == 35  # combinaciones de 4 pesos en cuartos que suman 1
+                assert all(abs(sum(f[f"w_{s}"] for s in evaluar.SENALES_FUSION) - 1.0) < 1e-9 for f in calibracion)
+                assert calibracion[0]["ndcg@5_promedio"] == max(f["ndcg@5_promedio"] for f in calibracion)
+                assert (Path(dir_eval) / "calibracion.csv").exists()
         finally:
             for tabla in catalogo_bd.values():
                 tabla.cerrar()
+
+    # Partición: disjunta, completa, determinista y sin depender del orden de los ids.
+    usuarios = list(range(1, 101))
+    particion = evaluar.particionar_usuarios(usuarios)
+    grupos = [set(particion[g]) for g in ("train", "val", "test")]
+    assert sum(map(len, grupos)) == 100 and set().union(*grupos) == set(usuarios)
+    assert [len(g) for g in grupos] == [60, 20, 20]
+    assert particion == evaluar.particionar_usuarios(list(reversed(usuarios)))
+    assert max(particion["test"]) > 80 and min(particion["test"]) <= 20  # no es un rango contiguo
 
     print("OK: ecommerce recomendador y evaluacion")
 

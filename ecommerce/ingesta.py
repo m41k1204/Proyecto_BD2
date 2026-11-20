@@ -12,10 +12,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import requests
 from PIL import Image
 
 import cliente_bd as bd
+import visuales
 from config import (
     CARPETA_DATOS,
     CARPETA_MULTIMEDIA,
@@ -37,6 +39,7 @@ from config import (
     TABLA_CATALOGO,
     TABLA_ORDENES,
     TABLA_SUCURSALES,
+    TABLAS_VISUALES,
     URL_DATASET,
     URL_DATASET_UCSD,
 )
@@ -512,8 +515,20 @@ def crear_tablas():
         f"ubicacion POINT"
         f") USING BPLUS;"
     )
+    bd.ejecutar(_ddl_catalogo(TABLA_CATALOGO, DIMENSION))
     bd.ejecutar(
-        f"CREATE TABLE {TABLA_CATALOGO} ("
+        f"CREATE TABLE {TABLA_ORDENES} ("
+        f"id INT PRIMARY KEY, "
+        f"usuario_id INT, "
+        f"item_id INT, "
+        f"fecha DATE"
+        f") USING BPLUS;"
+    )
+
+
+def _ddl_catalogo(tabla, dimension):
+    return (
+        f"CREATE TABLE {tabla} ("
         f"id INT PRIMARY KEY, "
         f"codigo VARCHAR({LARGOS_CATALOGO['codigo']}), "
         f"nombre VARCHAR({LARGOS_CATALOGO['nombre']}), "
@@ -524,15 +539,7 @@ def crear_tablas():
         f"sucursal_id INT, "
         f"imagen VARCHAR({LARGOS_CATALOGO['imagen']}), "
         f"descripcion TEXT, "
-        f"emb VECTOR({DIMENSION})"
-        f") USING BPLUS;"
-    )
-    bd.ejecutar(
-        f"CREATE TABLE {TABLA_ORDENES} ("
-        f"id INT PRIMARY KEY, "
-        f"usuario_id INT, "
-        f"item_id INT, "
-        f"fecha DATE"
+        f"emb VECTOR({dimension})"
         f") USING BPLUS;"
     )
 
@@ -616,6 +623,44 @@ def cargar(productos, ordenes):
     analizar_tablas()
 
 
+def _vectores_visuales(modelo, productos):
+    rutas = [CARPETA_MULTIMEDIA / p["imagen"] for p in productos]
+    if modelo == "clip":
+        return visuales.vectores_clip(rutas)
+    # sift4096: histogramas del catálogo -> IDF propio de esta tabla -> TF-IDF por producto
+    histogramas = np.array([visuales.histograma_sift4096(ruta) for ruta in rutas])
+    tfidf = visuales.ajustar_tfidf_sift4096(histogramas)
+    return np.array([tfidf.transformar(h) for h in histogramas])
+
+
+def cargar_visuales(modelos, lote=10):
+    """Copia 'catalogo' a una tabla por modelo con su vector calculado en la app e índice HNSW."""
+    productos = bd.filas(f"SELECT {COLUMNAS_INSERT_CATALOGO} FROM {TABLA_CATALOGO} ORDER BY id;")
+    if not productos:
+        raise SystemExit("el catálogo está vacío; corre primero la ingesta completa")
+    for modelo in modelos:
+        tabla = TABLAS_VISUALES[modelo]
+        inicio = time.time()
+        print(f"vectorizando {len(productos)} imágenes con {modelo} en la app...")
+        vectores = _vectores_visuales(modelo, productos)
+        print(f"  {vectores.shape[1]} dimensiones en {time.time() - inicio:.0f} s")
+        bd.ejecutar(f"DROP TABLE IF EXISTS {tabla};")
+        bd.ejecutar(_ddl_catalogo(tabla, vectores.shape[1]))
+        filas = [{**p, "emb": v} for p, v in zip(productos, vectores)]
+        # lotes chicos: cada fila lleva hasta 4096 números en el SQL
+        for i in range(0, len(filas), lote):
+            bloque = filas[i:i + lote]
+            valores = ", ".join(
+                _fila_producto(f)[:-1] + ", " + bd.vector_sql(f["emb"]) + ")" for f in bloque
+            )
+            bd.ejecutar(f"INSERT INTO {tabla} ({COLUMNAS_INSERT_CATALOGO}, emb) VALUES {valores};")
+        print(" ", bd.ejecutar(
+            f"CREATE INDEX hnsw_{tabla} ON {tabla} (emb) USING HNSW WITH (METRIC=cosine);"
+        )["message"])
+        bd.ejecutar(f"ANALYZE {tabla};")
+        print(f"  {tabla} lista en {time.time() - inicio:.0f} s")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ingesta de Amazon Reviews 2023 al motor BD2")
     parser.add_argument("--categoria", default=CATEGORIA_DATASET)
@@ -624,10 +669,21 @@ def main():
     parser.add_argument("--sin-cargar", action="store_true")
     parser.add_argument("--archivo-interacciones", default=None)
     parser.add_argument("--archivo-meta", default=None)
+    parser.add_argument(
+        "--visuales", default=None,
+        help="solo crea las tablas de modelos visuales extra sobre el catálogo ya cargado (ej. sift4096,clip)",
+    )
     argumentos = parser.parse_args()
 
     if not argumentos.sin_cargar and not bd.disponible():
         raise SystemExit("el motor no responde; levanta el backend en el puerto configurado")
+    if argumentos.visuales:
+        modelos = [m.strip() for m in argumentos.visuales.split(",") if m.strip()]
+        invalidos = [m for m in modelos if m not in TABLAS_VISUALES or m == "sift256"]
+        if invalidos:
+            raise SystemExit(f"modelos inválidos {invalidos}; usa sift4096 y/o clip")
+        cargar_visuales(modelos)
+        return
 
     inicio = time.time()
     ruta_inter = descargar_interacciones(argumentos.categoria, argumentos.archivo_interacciones)

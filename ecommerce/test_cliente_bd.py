@@ -59,6 +59,9 @@ def probar_formateadores():
         _espera_error(bd.punto_sql, lat, lon)
 
     assert bd.vector_sql([0.5, -0.1234567, 1]) == "VECTOR(0.5, -0.123457, 1)"
+    largo = bd.vector_sql(range(1, 10))
+    assert bd._abreviar_vectores(f"WHERE SIMILAR_TO({largo}, k=3)") == "WHERE SIMILAR_TO(VECTOR(1, 2, 3, … 9 valores), k=3)"
+    assert bd._abreviar_vectores("VECTOR(1, 2)") == "VECTOR(1, 2)"
     for vec in ([], [True], [0.1, float("nan")], [float("inf")]):
         _espera_error(bd.vector_sql, vec)
 

@@ -36,6 +36,40 @@ services:
       - backend
     restart: unless-stopped
 
+  # Motor propio de la tienda: carga el vocabulario SIFT del catálogo, que no puede convivir con el de
+  # la parte 4 en el motor general (el motor carga un solo vocabulario de fotos).
+  backend-ecommerce:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    profiles: ["ecommerce"]
+    environment:
+      BD2_MODELS_DIR: /app/data/modelos_ecommerce
+    volumes:
+      - runtime_ecommerce:/app/data/runtime
+      - ./data/multimedia:/app/data/multimedia:ro
+      - ./data/modelos_ecommerce:/app/data/modelos_ecommerce:ro
+    restart: unless-stopped
+
+  ecommerce:
+    build:
+      context: .
+      dockerfile: ecommerce/Dockerfile
+    profiles: ["ecommerce"]
+    environment:
+      BD2_URL: http://backend-ecommerce:8000
+    volumes:
+      - ./data/ecommerce:/app/data/ecommerce
+      # con escritura: aquí se guardan las imágenes del catálogo y, por un momento, la foto que sube el usuario
+      - ./data/multimedia:/app/data/multimedia
+      - ./data/modelos_ecommerce_k4096:/app/data/modelos_ecommerce_k4096:ro
+    ports:
+      - "127.0.0.1:8300:8300"
+    depends_on:
+      - backend-ecommerce
+    restart: unless-stopped
+
 volumes:
   runtime:
+  runtime_ecommerce:
   hf_cache:

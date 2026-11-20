@@ -3,6 +3,7 @@ import re
 import time
 
 import cliente_bd as bd
+import visuales
 from config import (
     ESCALA_ESPACIAL_M,
     FUSION_DEFECTO,
@@ -11,12 +12,15 @@ from config import (
     K_RECOMENDACIONES,
     K_SUCURSALES_KNN,
     METODO_VECTORIAL,
+    MODELO_VISUAL_DEFECTO,
+    MODELOS_VISUALES,
     PESO_ESPACIAL_DEFECTO,
     PESOS_DEFECTO,
     RRF_K,
     TABLA_CATALOGO,
     TABLA_ORDENES,
     TABLA_SUCURSALES,
+    TABLAS_VISUALES,
 )
 
 MODOS = ("hibrido", "cocompra", "visual", "texto", "metadata", "espacial")
@@ -274,9 +278,8 @@ def _productos_por_cercania(filtros, ids_sucursales, tope, total_sucursales):
     return filas
 
 
-def cocompra(item_id, k, filtros=None, ids_sucursales=None, max_usuario_id=None):
-    if max_usuario_id is not None and int(max_usuario_id) <= 0:
-        return []
+def cocompra(item_id, k, filtros=None, ids_sucursales=None, usuarios_excluidos=None):
+    """usuarios_excluidos: compras que no cuentan (la evaluación excluye val/test para no filtrar la respuesta)."""
     filtros = filtros or {}
     hay_filtros_cat = (
         bool(filtros.get("categoria"))
@@ -286,8 +289,8 @@ def cocompra(item_id, k, filtros=None, ids_sucursales=None, max_usuario_id=None)
     )
     limite_ord = int(k) * 3 if hay_filtros_cat else int(k)
     cond_train = (
-        f" AND o1.usuario_id <= {bd.numero_sql(int(max_usuario_id))}"
-        if max_usuario_id is not None
+        f" AND o1.usuario_id NOT IN {bd.lista_sql(sorted(usuarios_excluidos))}"
+        if usuarios_excluidos
         else ""
     )
     sql_ord = (
@@ -359,6 +362,11 @@ def metadata(producto, k, filtros=None, ids_sucursales=None):
     return consultar(filtros_meta, bono=0.0)
 
 
+def _validar_modelo_visual(modelo_visual):
+    if modelo_visual not in MODELOS_VISUALES:
+        raise ValueError(f"modelo visual desconocido '{modelo_visual}'; usa {', '.join(MODELOS_VISUALES)}")
+
+
 def visual(
     ruta_imagen,
     k,
@@ -366,13 +374,19 @@ def visual(
     excluir_id=None,
     ids_sucursales=None,
     metodo=METODO_VECTORIAL,
+    modelo_visual=MODELO_VISUAL_DEFECTO,
 ):
+    _validar_modelo_visual(modelo_visual)
     if not ruta_imagen:
         return []
     clausulas = _clausulas_filtro(filtros, excluir_id=excluir_id, ids_sucursales=ids_sucursales)
+    if modelo_visual == "sift256":
+        consulta = bd.texto_sql(ruta_imagen)  # el motor extrae SIFT+BoVW del archivo
+    else:
+        consulta = bd.vector_sql(visuales.vector(modelo_visual, ruta_imagen))
     sql = (
-        f"SELECT {COLUMNAS_PRODUCTO}, SIMILARITY_SCORE() AS puntaje FROM {TABLA_CATALOGO} "
-        f"WHERE SIMILAR_TO({bd.texto_sql(ruta_imagen)}, k={int(k)}){_sufijo_and(clausulas)} "
+        f"SELECT {COLUMNAS_PRODUCTO}, SIMILARITY_SCORE() AS puntaje FROM {TABLAS_VISUALES[modelo_visual]} "
+        f"WHERE SIMILAR_TO({consulta}, k={int(k)}){_sufijo_and(clausulas)} "
         f"USING {metodo} WITH METRIC=cosine;"
     )
     return bd.filas(sql)
@@ -391,10 +405,7 @@ def texto(consulta, k, filtros=None, excluir_id=None, ids_sucursales=None, ranki
         f"WHERE MATCH(descripcion, {bd.texto_sql(consulta_limpia)}){_sufijo_and(clausulas)} "
         f"USING {ranking} LIMIT {int(k)};"
     )
-    try:
-        return bd.filas(sql)
-    except bd.ErrorMotor:
-        return []
+    return bd.filas(sql)
 
 
 def espacial(producto, k, lat, lon, filtros=None, ids_sucursales=None, candidatos=None):
@@ -539,6 +550,54 @@ def _formatear_simple(filas, metodo, k):
     return salida
 
 
+def calcular_senales(
+    semilla,
+    senales,
+    k,
+    filtros=None,
+    ids_sucursales=None,
+    usuarios_excluidos=None,
+    modelo_visual=MODELO_VISUAL_DEFECTO,
+):
+    """Candidatos y tiempo de cada señal no espacial; la fusión va aparte (la calibración la repite)."""
+    item_id = semilla["id"]
+    listas = {}
+    tiempos = {}
+    for senal in senales:
+        t0 = time.perf_counter()
+        if senal == "cocompra":
+            listas[senal] = cocompra(
+                item_id, k, filtros, ids_sucursales=ids_sucursales, usuarios_excluidos=usuarios_excluidos
+            )
+        elif senal == "metadata":
+            listas[senal] = metadata(semilla, k, filtros, ids_sucursales=ids_sucursales)
+        elif senal == "visual":
+            listas[senal] = visual(
+                semilla.get("imagen"),
+                k,
+                filtros,
+                excluir_id=item_id,
+                ids_sucursales=ids_sucursales,
+                modelo_visual=modelo_visual,
+            )
+        elif senal == "texto":
+            consulta_txt = " ".join(
+                p
+                for p in (
+                    semilla.get("nombre"),
+                    semilla.get("marca"),
+                    semilla.get("categoria"),
+                    semilla.get("descripcion"),
+                )
+                if p
+            )
+            listas[senal] = texto(
+                consulta_txt, k, filtros, excluir_id=item_id, ids_sucursales=ids_sucursales
+            )
+        tiempos[f"{senal}_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    return listas, tiempos
+
+
 def recomendar(
     item_id,
     modo="hibrido",
@@ -546,11 +605,13 @@ def recomendar(
     pesos=None,
     filtros=None,
     candidatos=K_CANDIDATOS,
-    max_usuario_id=None,
+    usuarios_excluidos=None,
     fusion=FUSION_DEFECTO,
+    modelo_visual=MODELO_VISUAL_DEFECTO,
 ):
     if modo not in MODOS:
         raise ValueError(f"modo desconocido '{modo}'; usa {', '.join(MODOS)}")
+    _validar_modelo_visual(modelo_visual)
     if fusion not in FUSIONES:
         raise ValueError(f"fusión desconocida '{fusion}'; usa {', '.join(FUSIONES)}")
     filtros = dict(filtros or {})
@@ -594,43 +655,9 @@ def recomendar(
         usar_espacial = False
         k_senal = k
 
-    listas = {}
-    tiempos = {}
-    for senal in activas:
-        t0 = time.perf_counter()
-        if senal == "cocompra":
-            listas[senal] = cocompra(
-                item_id,
-                k_senal,
-                filtros,
-                ids_sucursales=ids_sucursales,
-                max_usuario_id=max_usuario_id,
-            )
-        elif senal == "metadata":
-            listas[senal] = metadata(semilla, k_senal, filtros, ids_sucursales=ids_sucursales)
-        elif senal == "visual":
-            listas[senal] = visual(
-                semilla.get("imagen"),
-                k_senal,
-                filtros,
-                excluir_id=item_id,
-                ids_sucursales=ids_sucursales,
-            )
-        elif senal == "texto":
-            consulta_txt = " ".join(
-                p
-                for p in (
-                    semilla.get("nombre"),
-                    semilla.get("marca"),
-                    semilla.get("categoria"),
-                    semilla.get("descripcion"),
-                )
-                if p
-            )
-            listas[senal] = texto(
-                consulta_txt, k_senal, filtros, excluir_id=item_id, ids_sucursales=ids_sucursales
-            )
-        tiempos[f"{senal}_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    listas, tiempos = calcular_senales(
+        semilla, activas, k_senal, filtros, ids_sucursales, usuarios_excluidos, modelo_visual
+    )
 
     cercanas_knn = []
     if usar_espacial:
@@ -693,14 +720,19 @@ def buscar_texto(consulta, modo="bm25", k=K_RECOMENDACIONES, filtros=None):
     }
 
 
-def buscar_imagen(ruta_relativa, k=K_RECOMENDACIONES, filtros=None, metodo=METODO_VECTORIAL):
+def buscar_imagen(
+    ruta_relativa, k=K_RECOMENDACIONES, filtros=None, metodo=METODO_VECTORIAL, modelo_visual=MODELO_VISUAL_DEFECTO
+):
+    _validar_modelo_visual(modelo_visual)
     filtros = dict(filtros or {})
     ids_sucursales, cercanas = _resolver_espacial(filtros)
     if ids_sucursales is not None and not ids_sucursales:
         return {"productos": [], "tiempos": {}, "sucursales_en_radio": []}
 
     t0 = time.perf_counter()
-    filas = visual(ruta_relativa, k, filtros, ids_sucursales=ids_sucursales, metodo=metodo)
+    filas = visual(
+        ruta_relativa, k, filtros, ids_sucursales=ids_sucursales, metodo=metodo, modelo_visual=modelo_visual
+    )
     tiempos = {"visual_ms": round((time.perf_counter() - t0) * 1000, 1)}
     resultados = _formatear_simple(filas, "visual", k)
     resultados = _enriquecer_sucursal(

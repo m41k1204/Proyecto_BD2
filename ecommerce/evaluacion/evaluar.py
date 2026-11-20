@@ -15,15 +15,37 @@ if str(RAIZ_ECOM) not in sys.path:
 
 import cliente_bd as bd
 import recomendador
-from config import K_RECOMENDACIONES, PESOS_DEFECTO, RAIZ_PROYECTO, TABLA_CATALOGO, TABLA_ORDENES
+from config import (
+    K_CANDIDATOS,
+    K_RECOMENDACIONES,
+    MODELOS_VISUALES,
+    PESOS_DEFECTO,
+    RAIZ_PROYECTO,
+    TABLA_CATALOGO,
+    TABLA_ORDENES,
+)
+
+# Partición fija de usuarios (independiente de --semilla, que solo elige los casos): así los pesos
+# calibrados en val nunca ven usuarios de test, para ninguna semilla de evaluación.
+SEMILLA_PARTICION = 2026
+FRACCION_VAL = 0.2
+FRACCION_TEST = 0.2
+SENALES_FUSION = ("cocompra", "visual", "texto", "metadata")
+PASO_CALIBRACION = 0.05
 
 ESTRATEGIAS_EVAL = (
-    ("cocompra", "cocompra", None),
-    ("visual", "visual", None),
-    ("texto", "texto", None),
-    ("metadata", "metadata", None),
-    ("hibrido_rrf", "hibrido", "rrf"),
-    ("hibrido_score", "hibrido", "score"),
+    ("cocompra", "cocompra", {}),
+    ("visual", "visual", {}),
+    ("texto", "texto", {}),
+    ("metadata", "metadata", {}),
+    ("hibrido_rrf", "hibrido", {"fusion": "rrf"}),
+    ("hibrido_score", "hibrido", {"fusion": "score"}),
+)
+# --visuales: cada modelo visual solo y dentro del híbrido score (pesos por defecto).
+ESTRATEGIAS_VISUALES = tuple(
+    (f"{prefijo}_{m}", modo, {"modelo_visual": m, **extra})
+    for prefijo, modo, extra in (("visual", "visual", {}), ("hibrido_score", "hibrido", {"fusion": "score"}))
+    for m in MODELOS_VISUALES
 )
 SALIDA_DEFECTO = RAIZ_PROYECTO / "benchmarks" / "ecommerce_results"
 
@@ -49,29 +71,27 @@ def _percentil(valores, p):
     return ordenados[indice]
 
 
-def _cargar_casos(muestras, semilla):
-    filas_ord = bd.filas(f"SELECT usuario_id, item_id FROM {TABLA_ORDENES};")
-    por_usuario = {}
-    for fila in filas_ord:
-        por_usuario.setdefault(int(fila["usuario_id"]), []).append(int(fila["item_id"]))
-
-    usuarios = sorted(uid for uid, items in por_usuario.items() if len(set(items)) >= 2)
-    if len(usuarios) < 2:
-        raise ValueError("se necesitan al menos 2 usuarios con >= 2 ítems para evaluar")
-
-    n_train = max(1, min(len(usuarios) - 1, int(len(usuarios) * 0.8)))
-    corte_train = usuarios[n_train - 1]
-    usuarios_test = usuarios[n_train:]
-
-    categorias = {
-        int(fila["id"]): fila.get("categoria")
-        for fila in bd.filas(f"SELECT id, categoria FROM {TABLA_CATALOGO};")
+def particionar_usuarios(usuarios, semilla=SEMILLA_PARTICION):
+    """Train / val / test al azar. Los usuario_id de la ingesta van de más a menos compras,
+    así que cortar por rango de id dejaría en test solo a los usuarios con menos historial."""
+    mezclados = sorted(usuarios)
+    random.Random(semilla).shuffle(mezclados)
+    n_test = max(1, round(len(mezclados) * FRACCION_TEST))
+    n_val = max(1, round(len(mezclados) * FRACCION_VAL))
+    if len(mezclados) - n_test - n_val < 1:
+        raise ValueError("se necesitan al menos 3 usuarios con >= 2 ítems para evaluar")
+    return {
+        "test": mezclados[:n_test],
+        "val": mezclados[n_test:n_test + n_val],
+        "train": mezclados[n_test + n_val:],
     }
 
-    rng = random.Random(semilla)
-    rng.shuffle(usuarios_test)
+
+def _casos_de(usuarios, por_usuario, categorias, muestras, rng):
+    orden = list(usuarios)
+    rng.shuffle(orden)
     casos = []
-    for uid in usuarios_test:
+    for uid in orden:
         unicos = sorted(set(por_usuario[uid]))
         semilla_id = rng.choice(unicos)
         objetivos = {pid for pid in unicos if pid != semilla_id}
@@ -85,7 +105,32 @@ def _cargar_casos(muestras, semilla):
         })
         if len(casos) >= muestras:
             break
-    return corte_train, casos
+    return casos
+
+
+def _cargar_casos(muestras, semilla):
+    """Casos de test y de val, y qué usuarios excluir de la co-compra en cada escenario."""
+    filas_ord = bd.filas(f"SELECT usuario_id, item_id FROM {TABLA_ORDENES};")
+    por_usuario = {}
+    for fila in filas_ord:
+        por_usuario.setdefault(int(fila["usuario_id"]), []).append(int(fila["item_id"]))
+
+    usuarios = [uid for uid, items in por_usuario.items() if len(set(items)) >= 2]
+    particion = particionar_usuarios(usuarios)
+
+    categorias = {
+        int(fila["id"]): fila.get("categoria")
+        for fila in bd.filas(f"SELECT id, categoria FROM {TABLA_CATALOGO};")
+    }
+    rng = random.Random(semilla)
+    return {
+        "casos_test": _casos_de(particion["test"], por_usuario, categorias, muestras, rng),
+        "casos_val": _casos_de(particion["val"], por_usuario, categorias, muestras, rng),
+        # test: la co-compra usa train + val; val (calibración): solo train; cold-start: nadie.
+        "excluir_test": set(particion["test"]),
+        "excluir_val": set(particion["test"]) | set(particion["val"]),
+        "excluir_todos": set(por_usuario),
+    }
 
 
 def _metricas_caso(recomendados, objetivos, categoria_semilla, k):
@@ -141,19 +186,18 @@ def _escribir_csv(ruta, filas):
         escritor.writerows(filas)
 
 
-def _evaluar_escenario(casos, k, max_usuario_id, etiqueta_log=None):
+def _evaluar_escenario(casos, k, usuarios_excluidos, etiqueta_log=None, estrategias=ESTRATEGIAS_EVAL):
     detalle = []
     resumenes = []
-    for etiqueta, modo, fusion in ESTRATEGIAS_EVAL:
+    for etiqueta, modo, kwargs in estrategias:
         filas_modo = []
-        kwargs = {"fusion": fusion} if fusion else {}
         for idx, caso in enumerate(casos, start=1):
             t0 = time.perf_counter()
             respuesta = recomendador.recomendar(
                 caso["semilla_id"],
                 modo=modo,
                 k=k,
-                max_usuario_id=max_usuario_id,
+                usuarios_excluidos=usuarios_excluidos,
                 **kwargs,
             )
             ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -184,21 +228,82 @@ def _medir_ms(fn, *args, **kwargs):
 
 
 def _preparar(muestras, semilla, salida):
-    corte_train, casos = _cargar_casos(muestras, semilla)
-    if not casos:
+    datos = _cargar_casos(muestras, semilla)
+    if not datos["casos_test"]:
         raise ValueError("no se encontraron casos válidos en el split de prueba")
     destino = Path(salida)
     destino.mkdir(parents=True, exist_ok=True)
-    return corte_train, casos, destino
+    return datos, destino
+
+
+def _grilla_pesos(paso):
+    """Todas las combinaciones de pesos de SENALES_FUSION que suman 1, con el paso dado."""
+    n = round(1 / paso)
+    for a in range(n + 1):
+        for b in range(n + 1 - a):
+            for c in range(n + 1 - a - b):
+                d = n - a - b - c
+                yield dict(zip(SENALES_FUSION, (round(x * paso, 4) for x in (a, b, c, d))))
+
+
+def calibrar_pesos(muestras=100, k=K_RECOMENDACIONES, salida=SALIDA_DEFECTO, semilla=42, paso=PASO_CALIBRACION):
+    """Busca los pesos del híbrido score que maximizan el NDCG@k promedio (normal y cold-start) en val.
+
+    Cada señal se consulta una sola vez por caso (no depende de los pesos); la grilla solo repite la fusión.
+    """
+    datos, destino = _preparar(muestras, semilla, salida)
+    if not datos["casos_val"]:
+        raise ValueError("no se encontraron casos válidos en el split de validación")
+    preparados = []
+    for caso in datos["casos_val"]:
+        semilla_prod = recomendador.obtener_producto(caso["semilla_id"])
+        listas, _ = recomendador.calcular_senales(
+            semilla_prod, SENALES_FUSION, K_CANDIDATOS, usuarios_excluidos=datos["excluir_val"]
+        )
+        preparados.append((caso, listas))
+
+    def media(pesos, sin_cocompra):
+        metricas = []
+        for caso, listas in preparados:
+            # cold-start = las mismas listas sin co-compra (equivale a excluir a todos los usuarios)
+            usadas = {s: l for s, l in listas.items() if not (sin_cocompra and s == "cocompra")}
+            top = recomendador.fusionar(usadas, pesos, k, "score")
+            metricas.append(_metricas_caso(top, caso["objetivos"], caso["categoria"], k))
+        return {clave: statistics.mean(m[clave] for m in metricas) for clave in ("ndcg_k", "hit", "mrr")}
+
+    filas = []
+    for pesos in _grilla_pesos(paso):
+        normal, cold = media(pesos, False), media(pesos, True)
+        filas.append({
+            **{f"w_{s}": pesos[s] for s in SENALES_FUSION},
+            # objetivo: el sistema enfrenta ambos escenarios; solo "normal" deja en 0 a las señales de contenido
+            f"ndcg@{k}_promedio": round((normal["ndcg_k"] + cold["ndcg_k"]) / 2, 4),
+            f"ndcg@{k}": round(normal["ndcg_k"], 4),
+            f"hit@{k}": round(normal["hit"], 4),
+            "mrr": round(normal["mrr"], 4),
+            f"ndcg@{k}_cold": round(cold["ndcg_k"], 4),
+            f"hit@{k}_cold": round(cold["hit"], 4),
+            "mrr_cold": round(cold["mrr"], 4),
+        })
+    filas.sort(key=lambda f: (-f[f"ndcg@{k}_promedio"], -f[f"ndcg@{k}"], -f["mrr"]))
+    _escribir_csv(destino / "calibracion.csv", filas)
+    actuales = next(
+        (f for f in filas if all(abs(f[f"w_{s}"] - PESOS_DEFECTO.get(s, 0)) < 1e-9 for s in SENALES_FUSION)), None
+    )
+    print(f"[calibracion] {len(preparados)} casos de val, {len(filas)} combinaciones")
+    print("[calibracion] mejor: " + json.dumps(filas[0], ensure_ascii=False))
+    if actuales is not None:
+        print("[calibracion] PESOS_DEFECTO actuales: " + json.dumps(actuales, ensure_ascii=False))
+    return filas
 
 
 def ejecutar_evaluacion_espacial(muestras=100, k=K_RECOMENDACIONES, salida=SALIDA_DEFECTO, semilla=42):
     """Compromiso Hit@k/NDCG@k vs. distancia media del Top k al variar w_espacial (híbrido score)."""
-    corte_train, casos, destino = _preparar(muestras, semilla, salida)
-    return evaluar_espacial(casos, k, corte_train, semilla, destino)
+    datos, destino = _preparar(muestras, semilla, salida)
+    return evaluar_espacial(datos["casos_test"], k, datos["excluir_test"], semilla, destino)
 
 
-def evaluar_espacial(casos, k, max_usuario_id, semilla, destino, pesos_espaciales=PESOS_ESPACIAL_EVAL):
+def evaluar_espacial(casos, k, usuarios_excluidos, semilla, destino, pesos_espaciales=PESOS_ESPACIAL_EVAL):
     rng = random.Random(semilla)
     lugares = [rng.choice(UBICACIONES_LIMA) for _ in casos]
     resumenes, detalle = [], []
@@ -213,7 +318,7 @@ def evaluar_espacial(casos, k, max_usuario_id, semilla, destino, pesos_espaciale
                 k=k,
                 pesos=pesos,
                 filtros={"lat": lat, "lon": lon},
-                max_usuario_id=max_usuario_id,
+                usuarios_excluidos=usuarios_excluidos,
                 fusion="score",
             )
             ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -259,6 +364,18 @@ def evaluar_espacial(casos, k, max_usuario_id, semilla, destino, pesos_espaciale
     return resumenes, latencias
 
 
+def ejecutar_evaluacion_visual(muestras=100, k=K_RECOMENDACIONES, salida=SALIDA_DEFECTO, semilla=42):
+    """SIFT k=256 vs. SIFT k=4096 vs. CLIP: señal visual sola y dentro del híbrido score."""
+    datos, destino = _preparar(muestras, semilla, salida)
+    resumenes, detalle = _evaluar_escenario(
+        datos["casos_test"], k, datos["excluir_test"], "visuales", ESTRATEGIAS_VISUALES
+    )
+    _escribir_csv(destino / "resumen_visuales.csv", resumenes)
+    _escribir_csv(destino / "detalle_visuales.csv", detalle)
+    print(f"resultados en {destino}")
+    return resumenes, detalle
+
+
 def ejecutar_evaluacion(
     muestras=100,
     k=K_RECOMENDACIONES,
@@ -267,14 +384,15 @@ def ejecutar_evaluacion(
     incluir_cold_start=True,
 ):
     """Evalúa señales e híbridos en hold-out normal y escenario cold-start sin co-compras."""
-    corte_train, casos, destino = _preparar(muestras, semilla, salida)
+    datos, destino = _preparar(muestras, semilla, salida)
+    casos = datos["casos_test"]
 
-    resumenes, detalle = _evaluar_escenario(casos, k, corte_train, "normal")
+    resumenes, detalle = _evaluar_escenario(casos, k, datos["excluir_test"], "normal")
     _escribir_csv(destino / "resumen.csv", resumenes)
     _escribir_csv(destino / "detalle.csv", detalle)
 
     if incluir_cold_start:
-        res_cold, det_cold = _evaluar_escenario(casos, k, 0, "cold-start")
+        res_cold, det_cold = _evaluar_escenario(casos, k, datos["excluir_todos"], "cold-start")
         _escribir_csv(destino / "resumen_cold_start.csv", res_cold)
         _escribir_csv(destino / "detalle_cold_start.csv", det_cold)
 
@@ -293,9 +411,23 @@ def main():
         "--espacial", action="store_true",
         help="solo el benchmark espacial: Hit/NDCG vs. distancia del Top k por w_espacial y latencias del R-Tree",
     )
+    parser.add_argument(
+        "--visuales", action="store_true",
+        help="solo la comparación de modelos visuales (SIFT k=256, SIFT k=4096, CLIP)",
+    )
+    parser.add_argument(
+        "--calibrar", action="store_true",
+        help="solo la búsqueda de pesos del híbrido score sobre los usuarios de val (calibracion.csv)",
+    )
     args = parser.parse_args()
     if not bd.disponible():
         raise SystemExit("el motor no responde; levanta el backend en el puerto configurado")
+    if args.calibrar:
+        calibrar_pesos(args.muestras, args.k, args.salida, args.semilla)
+        return
+    if args.visuales:
+        ejecutar_evaluacion_visual(args.muestras, args.k, args.salida, args.semilla)
+        return
     if args.espacial:
         ejecutar_evaluacion_espacial(args.muestras, args.k, args.salida, args.semilla)
         return

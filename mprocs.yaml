@@ -11,5 +11,7 @@ procs:
     shell: "pnpm dev:rostros"
   rostros-app:
     shell: "pnpm dev:rostros-app"
+  backend-ecommerce:
+    shell: "pnpm dev:backend-ecommerce"
   ecommerce:
     shell: "pnpm dev:ecommerce"

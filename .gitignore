@@ -44,3 +44,18 @@ rostros/.venv
 
 # App E-commerce: entorno local
 ecommerce/.venv
+
+# Vocabularios SIFT de la tienda (k=256 lo carga su motor; k=4096 lo usa la app). Sin datasets ni checkpoints.
+!data/modelos_ecommerce/
+data/modelos_ecommerce/*
+!data/modelos_ecommerce/fotos/
+data/modelos_ecommerce/fotos/*
+!data/modelos_ecommerce/fotos/vocabulary.json
+!data/modelos_ecommerce/fotos/training.json
+!data/modelos_ecommerce_k4096/
+data/modelos_ecommerce_k4096/*
+!data/modelos_ecommerce_k4096/fotos/
+data/modelos_ecommerce_k4096/fotos/*
+!data/modelos_ecommerce_k4096/fotos/vocabulary.json
+!data/modelos_ecommerce_k4096/fotos/training.json
+!data/modelos_ecommerce_k4096/fotos/tfidf_catalogo.json

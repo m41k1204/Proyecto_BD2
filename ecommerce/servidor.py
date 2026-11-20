@@ -9,6 +9,7 @@ RAIZ_ECOM = Path(__file__).resolve().parent
 if str(RAIZ_ECOM) not in sys.path:
     sys.path.insert(0, str(RAIZ_ECOM))
 
+import requests
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +17,7 @@ from PIL import Image
 
 import cliente_bd as bd
 import recomendador
+import visuales
 from config import (
     CARPETA_MULTIMEDIA,
     CATEGORIA_DATASET,
@@ -23,6 +25,7 @@ from config import (
     DIMENSION,
     FUSION_DEFECTO,
     K_RECOMENDACIONES,
+    MODELO_VISUAL_DEFECTO,
     PESO_ESPACIAL_DEFECTO,
     PESOS_DEFECTO,
     PUERTO,
@@ -30,9 +33,12 @@ from config import (
     TABLA_CATALOGO,
     TABLA_ORDENES,
     TABLA_SUCURSALES,
+    TABLAS_VISUALES,
 )
 
 MAX_IMAGEN_BYTES = 10 * 1024 * 1024
+# La web pagina las búsquedas pidiendo pagina*limite+1 resultados; tope para que no recorra todo el índice.
+MAX_K_BUSQUEDA = 100
 
 CARPETA_MULTIMEDIA.mkdir(parents=True, exist_ok=True)
 
@@ -104,6 +110,7 @@ def estado():
         "productos": 0,
         "sucursales": 0,
         "ordenes": 0,
+        "modelos_visuales": [],
     }
     if not salida["motor"]:
         return salida
@@ -111,7 +118,11 @@ def estado():
         salida["productos"] = _conteo(TABLA_CATALOGO)
         salida["sucursales"] = _conteo(TABLA_SUCURSALES)
         salida["ordenes"] = _conteo(TABLA_ORDENES)
-    except bd.ErrorMotor:
+        cargadas = {tabla["name"] for tabla in bd.tablas()}
+        salida["modelos_visuales"] = [
+            m for m in visuales.modelos_instalados() if TABLAS_VISUALES[m] in cargadas
+        ]
+    except (bd.ErrorMotor, requests.RequestException):
         pass
     return salida
 
@@ -189,6 +200,7 @@ def recomendaciones_producto(
     item_id: int,
     modo: str = Query(default="hibrido"),
     fusion: str = Query(default=FUSION_DEFECTO),
+    visual: str = Query(default=MODELO_VISUAL_DEFECTO),
     k: int = Query(default=K_RECOMENDACIONES, ge=1, le=30),
     w_cocompra: float | None = Query(default=None, ge=0.0, le=10.0),
     w_visual: float | None = Query(default=None, ge=0.0, le=10.0),
@@ -222,7 +234,7 @@ def recomendaciones_producto(
     try:
         with bd.registrar_consultas() as consultas:
             salida = recomendador.recomendar(
-                item_id, modo=modo, k=k, pesos=pesos, filtros=filtros, fusion=fusion
+                item_id, modo=modo, k=k, pesos=pesos, filtros=filtros, fusion=fusion, modelo_visual=visual
             )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -239,7 +251,7 @@ def recomendaciones_producto(
 def buscar_por_texto(
     q: str = Query(..., min_length=1),
     modo: str = Query(default="bm25"),
-    k: int = Query(default=K_RECOMENDACIONES, ge=1, le=30),
+    k: int = Query(default=K_RECOMENDACIONES, ge=1, le=MAX_K_BUSQUEDA),
     categoria: str | None = Query(default=None),
     precio_min: float | None = Query(default=None, ge=0.0),
     precio_max: float | None = Query(default=None, ge=0.0),
@@ -268,7 +280,7 @@ def buscar_por_texto(
 @app.post("/api/buscar/imagen")
 async def buscar_por_imagen(
     archivo: UploadFile = File(...),
-    k: int = Form(default=K_RECOMENDACIONES, ge=1, le=30),
+    k: int = Form(default=K_RECOMENDACIONES, ge=1, le=MAX_K_BUSQUEDA),
     categoria: str | None = Form(default=None),
     precio_min: float | None = Form(default=None),
     precio_max: float | None = Form(default=None),
@@ -276,8 +288,11 @@ async def buscar_por_imagen(
     lon: float | None = Form(default=None),
     radio_m: float | None = Form(default=None),
     zona: str | None = Form(default=None),
+    visual: str = Form(default=MODELO_VISUAL_DEFECTO),
 ):
     filtros = _filtros(categoria, precio_min, precio_max, lat, lon, radio_m, zona)
+    if visual not in TABLAS_VISUALES:
+        raise HTTPException(status_code=400, detail=f"modelo visual desconocido '{visual}'")
     contenido = await archivo.read(MAX_IMAGEN_BYTES + 1)
     if not contenido:
         raise HTTPException(status_code=400, detail="archivo vacío")
@@ -302,7 +317,9 @@ async def buscar_por_imagen(
     t0 = time.perf_counter()
     try:
         with bd.registrar_consultas() as consultas:
-            salida = recomendador.buscar_imagen(ruta_rel, k=k, filtros=filtros)
+            salida = recomendador.buscar_imagen(ruta_rel, k=k, filtros=filtros, modelo_visual=visual)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     except bd.ErrorMotor as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
     finally:

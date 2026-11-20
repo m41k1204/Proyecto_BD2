@@ -76,6 +76,8 @@ pnpm dev
 
 Abre <http://localhost:5173>. El backend queda en el puerto 8000.
 
+`pnpm dev` también levanta la tienda con recomendaciones (Parte 5) en <http://localhost:8300>, con su propio motor en el puerto 8001. Antes de usarla, cárgala una vez con `pnpm setup:ecommerce` y `cd ecommerce && .venv/bin/python ingesta.py`. En Docker va aparte: `docker compose --profile ecommerce up --build`. Detalles en [`ecommerce/README.md`](ecommerce/README.md).
+
 Para tener datos con los que probar, genera los CSV de demo (10 000 filas por tabla) e impórtalos desde el panel **Archivos**:
 
 ```bash

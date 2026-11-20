@@ -16,6 +16,7 @@
     "dev:rostros": "cd rostros && .venv/bin/uvicorn servidor:app --host 0.0.0.0 --port 8200",
     "dev:rostros-app": "pnpm --dir rostros/app start",
     "setup:ecommerce": "uv venv ecommerce/.venv --python 3.12 && uv pip install --python ecommerce/.venv/bin/python -r ecommerce/requirements.txt",
+    "dev:backend-ecommerce": "BD2_DATA_DIR=data/runtime_ecommerce BD2_MODELS_DIR=data/modelos_ecommerce backend/.venv/bin/uvicorn api.main:app --app-dir backend --port 8001",
     "dev:ecommerce": "cd ecommerce && .venv/bin/uvicorn servidor:app --port 8300"
   },
   "devDependencies": {

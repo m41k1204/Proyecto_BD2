@@ -11,3 +11,5 @@ data/demo
 *.pdf
 data/rag
 rag/.env
+data/ecommerce
+data/runtime_ecommerce

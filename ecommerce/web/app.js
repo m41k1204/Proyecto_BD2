@@ -1,11 +1,13 @@
+import { icono, estrellas, hidratarIconos } from "./iconos.js";
+
 const estado = {
   pagina: 1,
   limite: 12,
   modoRec: "hibrido",
   fusionRec: "score",
+  modeloVisual: "sift256",
   itemActivo: null,
-  busquedaActiva: false,
-  pesos: { cocompra: 0.55, texto: 0.25, metadata: 0.12, visual: 0.08, espacial: 0.10 },
+  pesos: { cocompra: 0.80, texto: 0.15, metadata: 0.0, visual: 0.05, espacial: 0.10 },
   ubicacion: null,
   zona: null,
   rectZona: null,
@@ -19,17 +21,18 @@ const estado = {
   sucursalesKnn: [],
   pedidoRec: 0,
   pedidoGrilla: 0,
-  archivoBusqueda: null,
+  // null = catálogo; {tipo: "texto", q, modo} o {tipo: "imagen", archivo}. Sobrevive a filtros y páginas.
+  busqueda: null,
 };
 
 const NOMBRES_SENAL = {
   cocompra: "Co-compra",
-  visual: "Visual (SIFT)",
+  visual: "Imagen (SIFT k=256)", // se reescribe al cambiar #modelo-visual
   texto: "Texto (BM25)",
   bm25: "BM25",
   tf_idf: "TF-IDF",
   metadata: "Metadata",
-  espacial: "Cercanía (R-Tree)",
+  espacial: "Cercanía",
 };
 
 const $estado = document.getElementById("estado");
@@ -38,11 +41,20 @@ const $consulta = document.getElementById("consulta");
 const $modoBusqueda = document.getElementById("modo-busqueda");
 const $archivoImagen = document.getElementById("archivo-imagen");
 const $limpiarBusqueda = document.getElementById("limpiar-busqueda");
+const $consultaFoto = document.getElementById("consulta-foto");
+const $fotoConsulta = document.getElementById("foto-consulta");
+const $infoFoto = document.getElementById("info-foto");
 const $categoria = document.getElementById("categoria");
 const $precioMin = document.getElementById("precio-min");
 const $precioMax = document.getElementById("precio-max");
 const $orden = document.getElementById("orden");
-const $aplicarFiltros = document.getElementById("aplicar-filtros");
+const $botonFoto = document.getElementById("boton-foto");
+const $textoUbicacion = document.getElementById("texto-ubicacion");
+const $tituloRec = document.getElementById("titulo-rec");
+const $preferencias = document.getElementById("preferencias");
+const $botonPreferencias = document.getElementById("boton-preferencias");
+const $resumenEstrategia = document.getElementById("resumen-estrategia");
+const $cerrarDetalle = document.getElementById("cerrar-detalle");
 const $toggleMapa = document.getElementById("toggle-mapa");
 const $panelMapa = document.getElementById("panel-mapa");
 const $radio = document.getElementById("radio");
@@ -68,6 +80,7 @@ const $pesosPanel = document.getElementById("pesos-panel");
 const $campoPesoEspacial = document.getElementById("campo-peso-espacial");
 const $sliderEspacial = $pesosPanel.querySelector('input[data-peso="espacial"]');
 const $fusionRec = document.getElementById("fusion-rec");
+const $modeloVisual = document.getElementById("modelo-visual");
 const $tiemposRec = document.getElementById("tiempos-rec");
 const $listaRec = document.getElementById("lista-recomendaciones");
 const $sqlCatalogo = document.getElementById("sql-catalogo");
@@ -83,6 +96,31 @@ function el(tag, clase, texto) {
 function formatoPrecio(precio) {
   if (precio === null || precio === undefined) return "Sin precio";
   return "$" + Number(precio).toFixed(2);
+}
+
+// Precio de marketplace: centavos en superíndice, como en las vitrinas de Amazon o Mercado Libre.
+function nodoPrecio(precio, clase = "precio") {
+  const nodo = el("span", clase);
+  if (precio === null || precio === undefined) {
+    nodo.textContent = "Sin precio";
+    nodo.classList.add("sin-precio");
+    return nodo;
+  }
+  const [enteros, centavos] = Number(precio).toFixed(2).split(".");
+  nodo.setAttribute("aria-label", "$" + enteros + "." + centavos);
+  nodo.append(el("span", "moneda", "$"), enteros, el("sup", "", centavos));
+  return nodo;
+}
+
+function nodoRating(rating) {
+  const nodo = el("span", "rating");
+  if (rating === null || rating === undefined) {
+    nodo.appendChild(el("span", "tenue", "Sin valoraciones"));
+    return nodo;
+  }
+  nodo.appendChild(el("span", "rating-numero", Number(rating).toFixed(1)));
+  nodo.appendChild(estrellas(rating));
+  return nodo;
 }
 
 function formatoDistancia(metros) {
@@ -122,10 +160,13 @@ function textoZona() {
 
 function botonTienda(p) {
   const suc = p.sucursal;
-  const dist = p.distancia_m !== null && p.distancia_m !== undefined ? ` · ${formatoDistancia(p.distancia_m)}` : "";
-  const boton = el("button", "enlace-tienda", `📍 ${suc.distrito}${dist}`);
+  const boton = el("button", "enlace-tienda");
   boton.type = "button";
   boton.title = `Ver ${suc.nombre} en el mapa`;
+  boton.append(icono("pin", 15), el("span", "", suc.distrito));
+  if (p.distancia_m !== null && p.distancia_m !== undefined) {
+    boton.appendChild(el("span", "distancia", formatoDistancia(p.distancia_m)));
+  }
   boton.addEventListener("click", (ev) => {
     ev.stopPropagation();
     verTiendaEnMapa(suc.id);
@@ -134,9 +175,9 @@ function botonTienda(p) {
 }
 
 function textoPaso(paso) {
-  let texto = paso.method ? `${paso.op} · ${paso.method}` : paso.op;
-  if (paso.detail) texto += ` — ${paso.detail}`;
-  if (paso.rows !== null && paso.rows !== undefined) texto += ` (${paso.rows} filas)`;
+  let texto = paso.method ? `${paso.op} (${paso.method})` : paso.op;
+  if (paso.detail) texto += `: ${paso.detail}`;
+  if (paso.rows !== null && paso.rows !== undefined) texto += `, ${paso.rows} filas`;
   return texto;
 }
 
@@ -148,11 +189,11 @@ function pintarConsultas(panel, consultas) {
   if (panel.hidden) return;
   const msMotor = consultas.reduce((suma, c) => suma + (c.ms_motor ?? c.ms_total), 0);
   panel.querySelector("summary").textContent =
-    `SQL y planes del motor BD2 · ${consultas.length} consultas · ${msMotor.toFixed(1)} ms en el motor`;
+    `SQL, planes y tiempos del motor: ${consultas.length} consultas, ${msMotor.toFixed(1)} ms en el motor`;
   consultas.forEach((c, i) => {
     const item = el("div", "consulta-sql");
-    const tiempo = c.ms_motor !== null && c.ms_motor !== undefined ? `${c.ms_motor} ms motor · ` : "";
-    item.appendChild(el("div", "tenue", `#${i + 1} · ${tiempo}${c.ms_total} ms total`));
+    const tiempo = c.ms_motor !== null && c.ms_motor !== undefined ? `${c.ms_motor} ms en el motor, ` : "";
+    item.appendChild(el("div", "tenue", `Consulta ${i + 1}: ${tiempo}${c.ms_total} ms en total`));
     item.appendChild(el("pre", "", c.sql));
     const pasos = el("ol", "plan-sql");
     for (const paso of c.plan || []) pasos.appendChild(el("li", "", textoPaso(paso)));
@@ -165,47 +206,68 @@ function pintarTiempos(contenedor, tiempos) {
   contenedor.replaceChildren();
   if (!tiempos) return;
   for (const [clave, ms] of Object.entries(tiempos)) {
-    const etiqueta = clave.replace(/_ms$/, "");
-    contenedor.appendChild(el("span", "tiempo-chip", `${etiqueta}: ${ms} ms`));
+    const chip = el("span", "tiempo-chip");
+    chip.append(el("span", "", clave.replace(/_ms$/, "")), el("strong", "", `${ms} ms`));
+    contenedor.appendChild(chip);
   }
 }
 
-function pintarBadges(producto) {
-  const wrap = el("div", "etiquetas");
-  for (const [senal, pos] of Object.entries(producto.posiciones || {})) {
-    let texto = `${NOMBRES_SENAL[senal] || senal} #${pos}`;
-    if (senal === "cocompra" && producto.cocompras) {
-      texto += ` (${producto.cocompras}×)`;
-    }
-    wrap.appendChild(el("span", `etiqueta ${senal}`, texto));
-  }
-  if (producto.distancia_m !== null && producto.distancia_m !== undefined) {
-    wrap.appendChild(el("span", "etiqueta distancia", formatoDistancia(producto.distancia_m)));
-  }
-  return wrap;
+
+// SIMILARITY_SCORE() con METRIC=cosine es 1 - distancia coseno: 1 = misma imagen.
+function barraSimilitud(puntaje) {
+  const valor = Math.max(0, Math.min(1, Number(puntaje)));
+  const fila = el("div", "similitud");
+  const barra = el("div", "barra-similitud");
+  const relleno = el("span");
+  relleno.style.width = `${valor * 100}%`;
+  barra.appendChild(relleno);
+  barra.setAttribute("role", "img");
+  barra.setAttribute("aria-label", `Similitud con tu foto: ${valor.toFixed(3)}`);
+  fila.appendChild(el("span", "tenue", "Similitud"));
+  fila.appendChild(barra);
+  fila.appendChild(el("strong", "", valor.toFixed(3)));
+  return fila;
 }
 
-function pintarGrilla(productos, mostrarBadges) {
+function mostrarFotoConsulta(archivo) {
+  if ($fotoConsulta.src) URL.revokeObjectURL($fotoConsulta.src);
+  $fotoConsulta.removeAttribute("src");
+  $consultaFoto.hidden = !archivo;
+  if (!archivo) return;
+  $fotoConsulta.src = URL.createObjectURL(archivo);
+  $infoFoto.textContent = `${archivo.name}, comparada con ${$modeloVisual.selectedOptions[0].textContent}`;
+}
+
+function pintarGrilla(productos) {
   $grilla.replaceChildren();
   if (!productos.length) {
-    $grilla.appendChild(el("p", "vacio", "No se encontraron productos con esos filtros."));
+    const vacio = el("div", "vacio");
+    vacio.appendChild(el("p", "", "No hay productos que coincidan."));
+    vacio.appendChild(el("p", "tenue", "Prueba otras palabras, otra categoría, un rango de precio más amplio o quita la ubicación."));
+    $grilla.appendChild(vacio);
     return;
   }
+  const conSimilitud = estado.busqueda && estado.busqueda.tipo === "imagen";
   for (const p of productos) {
     const tarjeta = el("article", "tarjeta");
     tarjeta.dataset.id = String(p.id);
     if (estado.itemActivo === p.id) tarjeta.classList.add("seleccionada");
-    tarjeta.appendChild(imagenProducto(p.imagen, p.nombre));
-    tarjeta.appendChild(el("h3", "", p.nombre));
-    const filaMeta = el("div", "meta-linea");
-    filaMeta.appendChild(el("span", "precio", formatoPrecio(p.precio)));
-    const ratingTxt = p.rating !== null && p.rating !== undefined ? `★ ${Number(p.rating).toFixed(1)}` : "Sin rating";
-    filaMeta.appendChild(el("span", "", ratingTxt));
-    tarjeta.appendChild(filaMeta);
-    const pie = el("div", "meta-linea", p.marca || "");
-    if (p.sucursal) pie.appendChild(botonTienda(p));
-    tarjeta.appendChild(pie);
-    if (mostrarBadges) tarjeta.appendChild(pintarBadges(p));
+    const marco = el("div", "marco-imagen");
+    marco.appendChild(imagenProducto(p.imagen, p.nombre));
+    tarjeta.appendChild(marco);
+    // El título es el control: Enter/Espacio y lectores de pantalla llegan al producto.
+    const titulo = el("h3");
+    const enlace = el("button", "titulo-producto", p.nombre);
+    enlace.type = "button";
+    titulo.appendChild(enlace);
+    tarjeta.appendChild(titulo);
+    tarjeta.appendChild(nodoRating(p.rating));
+    tarjeta.appendChild(nodoPrecio(p.precio));
+    if (p.marca) tarjeta.appendChild(el("span", "marca-producto", p.marca));
+    if (p.sucursal) tarjeta.appendChild(botonTienda(p));
+    if (conSimilitud && p.puntaje !== null && p.puntaje !== undefined) {
+      tarjeta.appendChild(barraSimilitud(p.puntaje));
+    }
     tarjeta.addEventListener("click", () => seleccionarProducto(p.id));
     $grilla.appendChild(tarjeta);
   }
@@ -216,14 +278,21 @@ async function cargarEstado() {
     const res = await fetch("/api/estado");
     const data = await res.json();
     if (!data.motor) {
-      $estado.textContent = "motor BD2 sin conexión";
+      $estado.textContent = "Motor BD2 de la tienda apagado: inícialo con pnpm dev:backend-ecommerce (puerto 8001)";
       $estado.classList.add("mal");
       return;
     }
     $estado.classList.remove("mal");
-    $estado.textContent = `${data.productos} productos · ${data.ordenes} órdenes · ${data.sucursales} tiendas`;
+    const miles = (n) => Number(n).toLocaleString("es-PE");
+    $estado.textContent = `${miles(data.productos)} productos, ${miles(data.ordenes)} órdenes y ${miles(data.sucursales)} tiendas en el motor`;
+    const cargados = new Set(data.modelos_visuales || []);
+    for (const opt of $modeloVisual.options) {
+      if (opt.value === "sift256") continue;
+      opt.disabled = !cargados.has(opt.value);
+      opt.title = opt.disabled ? "No está cargado: corre ingesta.py --visuales " + opt.value : "";
+    }
   } catch {
-    $estado.textContent = "sin conexión";
+    $estado.textContent = "Sin conexión con el servidor de la tienda";
     $estado.classList.add("mal");
   }
 }
@@ -253,8 +322,8 @@ function actualizarControlEspacial() {
   $sliderEspacial.disabled = !activa;
   $campoPesoEspacial.classList.toggle("deshabilitado", !activa);
   $campoPesoEspacial.title = activa
-    ? "Peso de cercanía (R-Tree k-NN)"
-    : "Fija tu ubicación en el mapa para activar";
+    ? "Peso de la cercanía (k-NN del R-Tree)"
+    : "Elige tu ubicación para activar";
   $ordenCercania.disabled = !activa;
   if (!activa && $orden.value === "cercania") $orden.value = "rating";
   $quitarZona.hidden = !estado.zona;
@@ -264,18 +333,18 @@ function construirPopupTienda(sucursal, { topItems, esSemilla, knnSuc }) {
   const cont = el("div", "popup-tienda");
   cont.appendChild(el("strong", "", `${sucursal.nombre} (${sucursal.distrito})`));
   if (knnSuc) {
-    cont.appendChild(el("div", "tenue", `k-NN cercano (R-Tree) · ${formatoDistancia(knnSuc.distancia_m)}`));
+    cont.appendChild(el("div", "tenue", `Entre las más cercanas (k-NN del R-Tree), a ${formatoDistancia(knnSuc.distancia_m)}`));
   } else if (estado.ubicacion && sucursal.lat !== null && sucursal.lon !== null) {
     const dist = distanciaMetros(estado.ubicacion.lat, estado.ubicacion.lon, sucursal.lat, sucursal.lon);
     cont.appendChild(el("div", "tenue", `A ${formatoDistancia(dist)}`));
   }
   if (esSemilla) {
-    cont.appendChild(el("div", "tenue", "Producto seleccionado"));
+    cont.appendChild(el("div", "tenue", "Aquí está el producto elegido"));
   }
   if (topItems.length) {
     const lista = el("div");
     for (const item of topItems) {
-      const boton = el("button", "popup-item", `#${item.pos} ${item.nombre}`);
+      const boton = el("button", "popup-item", `${item.pos}. ${item.nombre}`);
       boton.type = "button";
       boton.addEventListener("click", () => seleccionarProducto(item.id));
       lista.appendChild(boton);
@@ -311,8 +380,8 @@ function actualizarMarcadoresTiendas() {
     const knnSuc = knnMap.get(s.id) || null;
     if (topItems.length) {
       marcador.setStyle({
-        fillColor: "#22c55e",
-        color: esSemilla ? "#f59e0b" : "#14532d",
+        fillColor: "#2e7d32",
+        color: esSemilla ? "#e08600" : "#1b5e20",
         radius: 9 + Math.min(topItems.length, 5),
         weight: 3,
         fillOpacity: 0.9,
@@ -320,8 +389,8 @@ function actualizarMarcadoresTiendas() {
       marcador.bringToFront();
     } else if (esSemilla) {
       marcador.setStyle({
-        fillColor: "#f59e0b",
-        color: "#b45309",
+        fillColor: "#e08600",
+        color: "#8d4e00",
         radius: 10,
         weight: 2.5,
         fillOpacity: 0.9,
@@ -329,7 +398,7 @@ function actualizarMarcadoresTiendas() {
       marcador.bringToFront();
     } else if (knnSuc) {
       marcador.setStyle({
-        fillColor: "#14b8a6",
+        fillColor: "#0f9d8a",
         color: "#115e59",
         radius: 8,
         weight: 2,
@@ -337,8 +406,8 @@ function actualizarMarcadoresTiendas() {
       });
     } else {
       marcador.setStyle({
-        fillColor: "#94a3b8",
-        color: "#475569",
+        fillColor: "#a3a8b0",
+        color: "#5f646c",
         radius: 7,
         weight: 2,
         fillOpacity: 0.75,
@@ -358,7 +427,7 @@ async function cargarSucursales() {
 function inicializarMapa() {
   if (estado.mapa || typeof window.L === "undefined") {
     if (typeof window.L === "undefined") {
-      document.getElementById("mapa").textContent = "Leaflet no pudo cargarse (sin red). Usa 'Usar Miraflores' para probar el filtro espacial.";
+      document.getElementById("mapa").textContent = "El mapa necesita internet. Sin él, pulsa Usar Miraflores para probar el filtro por cercanía.";
     }
     return;
   }
@@ -384,9 +453,9 @@ function actualizarCapaUsuario() {
   }
   if (estado.ubicacion) {
     const punto = [estado.ubicacion.lat, estado.ubicacion.lon];
-    estado.marcadorUsuario = L.circleMarker(punto, { radius: 7, color: "#fff", weight: 2, fillColor: "#1f6feb", fillOpacity: 0.9, interactive: false }).addTo(estado.mapa);
+    estado.marcadorUsuario = L.circleMarker(punto, { radius: 8, color: "#fff", weight: 2.5, fillColor: "#D42A2F", fillOpacity: 1, interactive: false }).addTo(estado.mapa);
     if ($radio.value) {
-      estado.circuloRadio = L.circle(punto, { radius: Number($radio.value), color: "#1f6feb", fillOpacity: 0.12, interactive: false }).addTo(estado.mapa);
+      estado.circuloRadio = L.circle(punto, { radius: Number($radio.value), color: "#D42A2F", weight: 1.5, fillOpacity: 0.06, interactive: false }).addTo(estado.mapa);
     }
   }
   if (estado.rectZona) {
@@ -396,7 +465,7 @@ function actualizarCapaUsuario() {
   if (estado.zona) {
     const { sur, oeste, norte, este } = estado.zona;
     estado.rectZona = L.rectangle([[sur, oeste], [norte, este]], {
-      color: "#7c3aed", weight: 2, dashArray: "6 4", fillOpacity: 0.05, interactive: false,
+      color: "#1558C0", weight: 2, dashArray: "6 4", fillOpacity: 0.05, interactive: false,
     }).addTo(estado.mapa);
   }
   actualizarMarcadoresTiendas();
@@ -404,7 +473,7 @@ function actualizarCapaUsuario() {
 
 function abrirPanelMapa() {
   $panelMapa.hidden = false;
-  $toggleMapa.classList.add("activo");
+  $toggleMapa.setAttribute("aria-expanded", "true");
   inicializarMapa();
   if (estado.mapa) setTimeout(() => estado.mapa.invalidateSize(), 50);
 }
@@ -432,17 +501,25 @@ function fijarZona(zona) {
 function pintarResumenEspacial(enFiltro, enKnn) {
   const partes = [];
   if (estado.ubicacion) {
-    const { lat, lon } = estado.ubicacion;
-    const radioTxt = $radio.value ? `${Number($radio.value) / 1000} km` : "sin límite";
-    partes.push(`Ubicación: (${lat.toFixed(3)}, ${lon.toFixed(3)}) · radio ${radioTxt}`);
+    partes.push($radio.value ? `Tiendas a menos de ${Number($radio.value) / 1000} km` : "Todas las tiendas, sin límite de radio");
   }
-  if (estado.zona) partes.push("zona del mapa (R-Tree polygon)");
+  if (estado.zona) partes.push("solo en la zona filtrada del mapa");
   const hayFiltro = estado.zona || (estado.ubicacion && $radio.value);
-  if (hayFiltro && enFiltro !== undefined) {
-    partes.push(estado.zona ? `${enFiltro} tiendas en el filtro` : `${enFiltro} en radio`);
+  if (hayFiltro && enFiltro !== undefined) partes.push(`${enFiltro} tiendas dentro del filtro`);
+  if (enKnn !== undefined) partes.push(`${enKnn} más cercanas usadas al recomendar`);
+  $resumenEspacial.textContent = partes.join(", ");
+
+  const $etiqueta = $toggleMapa.querySelector(".ubicacion-etiqueta");
+  if (!estado.ubicacion) {
+    $etiqueta.textContent = "Tiendas cerca de";
+    $textoUbicacion.textContent = "Elegir ubicación";
+  } else if ($radio.value) {
+    $etiqueta.textContent = "Tiendas a menos de";
+    $textoUbicacion.textContent = `${Number($radio.value) / 1000} km de ti`;
+  } else {
+    $etiqueta.textContent = "Tiendas cerca de";
+    $textoUbicacion.textContent = "tu ubicación";
   }
-  if (enKnn !== undefined) partes.push(`${enKnn} en k-NN`);
-  $resumenEspacial.textContent = partes.join(" · ");
 }
 
 function fijarUbicacion(lat, lon) {
@@ -453,15 +530,48 @@ function fijarUbicacion(lat, lon) {
   recargarVistaActual();
 }
 
+// Igual a MAX_K_BUSQUEDA del servidor.
+const MAX_K_BUSQUEDA = 100;
+
+// Las búsquedas por similitud no tienen OFFSET: se piden los primeros pagina*limite+1 y se corta la página.
+function kBusqueda() {
+  return Math.min(estado.pagina * estado.limite + 1, MAX_K_BUSQUEDA);
+}
+
+function paginaDeBusqueda(productos) {
+  const desde = (estado.pagina - 1) * estado.limite;
+  return {
+    productos: productos.slice(desde, desde + estado.limite),
+    hayMas: productos.length > desde + estado.limite,
+  };
+}
+
+function prepararVista(titulo) {
+  $limpiarBusqueda.hidden = !estado.busqueda;
+  $aviso.hidden = true;
+  $tituloCatalogo.textContent = titulo;
+  // Una búsqueda ya viene ordenada por relevancia (BM25, TF-IDF o similitud de imagen).
+  $orden.disabled = Boolean(estado.busqueda);
+  $orden.title = estado.busqueda ? "Los resultados de una búsqueda se ordenan por relevancia" : "";
+}
+
+function mostrarAviso(texto) {
+  $aviso.textContent = texto;
+  $aviso.hidden = false;
+}
+
+function pintarPaginacion(pagina, hayMas) {
+  $paginacion.hidden = pagina <= 1 && !hayMas;
+  $pagInfo.textContent = `Página ${pagina}`;
+  $pagAnterior.disabled = pagina <= 1;
+  $pagSiguiente.disabled = !hayMas;
+}
+
 async function cargarCatalogo() {
   const pedido = ++estado.pedidoGrilla;
-  estado.busquedaActiva = false;
-  estado.archivoBusqueda = null;
-  $limpiarBusqueda.hidden = true;
-  $paginacion.hidden = false;
-  $aviso.hidden = true;
+  mostrarFotoConsulta(null);
+  prepararVista("Catálogo");
   $tiemposBusqueda.replaceChildren();
-  $tituloCatalogo.textContent = "Catálogo";
 
   const params = paramsFiltros();
   params.set("orden", $orden.value);
@@ -472,111 +582,115 @@ async function cargarCatalogo() {
   const data = await res.json();
   if (pedido !== estado.pedidoGrilla) return;
   if (!res.ok) {
-    $aviso.textContent = data.detail || "Error al cargar catálogo";
-    $aviso.hidden = false;
+    mostrarAviso(data.detail || "No se pudo cargar el catálogo. Revisa que el motor BD2 esté encendido.");
     return;
   }
-  pintarGrilla(data.productos, false);
+  pintarGrilla(data.productos);
   pintarConsultas($sqlCatalogo, data.consultas);
   if (!estado.itemActivo) pintarResumenEspacial((data.sucursales_en_radio || []).length);
-  $pagInfo.textContent = `Página ${data.pagina}`;
-  $pagAnterior.disabled = data.pagina <= 1;
-  $pagSiguiente.disabled = !data.hay_mas;
+  pintarPaginacion(data.pagina, data.hay_mas);
 }
 
 async function buscarTexto() {
-  const q = $consulta.value.trim();
-  if (!q) return cargarCatalogo();
+  const { q, modo } = estado.busqueda;
   const pedido = ++estado.pedidoGrilla;
-  estado.busquedaActiva = true;
-  estado.archivoBusqueda = null;
-  $limpiarBusqueda.hidden = false;
-  $paginacion.hidden = true;
-  $aviso.hidden = true;
-  $tituloCatalogo.textContent = `Resultados para "${q}"`;
+  mostrarFotoConsulta(null);
+  prepararVista(`Resultados para "${q}"`);
 
   const params = paramsFiltros();
   params.set("q", q);
-  params.set("modo", $modoBusqueda.value);
-  params.set("k", "16");
+  params.set("modo", modo);
+  params.set("k", String(kBusqueda()));
 
   const res = await fetch("/api/buscar?" + params.toString());
   const data = await res.json();
   if (pedido !== estado.pedidoGrilla) return;
   if (!res.ok) {
-    $aviso.textContent = data.detail || "Error en la búsqueda";
-    $aviso.hidden = false;
+    mostrarAviso(data.detail || "La búsqueda falló. Revisa que el motor BD2 esté encendido.");
     return;
   }
-  if (data.aviso) {
-    $aviso.textContent = data.aviso;
-    $aviso.hidden = false;
-  }
+  if (data.aviso) mostrarAviso(data.aviso);
+  const { productos, hayMas } = paginaDeBusqueda(data.productos);
   pintarTiempos($tiemposBusqueda, data.tiempos);
-  pintarGrilla(data.productos, true);
+  pintarGrilla(productos);
   pintarConsultas($sqlCatalogo, data.consultas);
+  pintarPaginacion(estado.pagina, hayMas);
 }
 
-async function buscarPorArchivo(archivo) {
+async function buscarPorArchivo() {
+  const { archivo } = estado.busqueda;
   const pedido = ++estado.pedidoGrilla;
-  estado.busquedaActiva = true;
-  estado.archivoBusqueda = archivo;
-  $limpiarBusqueda.hidden = false;
-  $paginacion.hidden = true;
-  $aviso.hidden = true;
-  $tituloCatalogo.textContent = `Búsqueda visual: ${archivo.name}`;
+  mostrarFotoConsulta(archivo);
+  prepararVista("Parecidos a tu foto");
 
   const form = new FormData();
   form.append("archivo", archivo);
-  form.append("k", "16");
-  if ($categoria.value) form.append("categoria", $categoria.value);
-  if ($precioMin.value !== "") form.append("precio_min", $precioMin.value);
-  if ($precioMax.value !== "") form.append("precio_max", $precioMax.value);
-  if (estado.ubicacion) {
-    form.append("lat", String(estado.ubicacion.lat));
-    form.append("lon", String(estado.ubicacion.lon));
-    if ($radio.value) form.append("radio_m", $radio.value);
-  }
-  if (estado.zona) form.append("zona", textoZona());
+  form.append("k", String(kBusqueda()));
+  form.append("visual", estado.modeloVisual);
+  for (const [clave, valor] of paramsFiltros()) form.append(clave, valor);
 
   const res = await fetch("/api/buscar/imagen", { method: "POST", body: form });
   const data = await res.json();
   if (pedido !== estado.pedidoGrilla) return;
   if (!res.ok) {
-    $aviso.textContent = data.detail || "No se pudo procesar la imagen";
-    $aviso.hidden = false;
-    estado.archivoBusqueda = null;
+    estado.busqueda = null;
+    mostrarFotoConsulta(null);
+    prepararVista("Catálogo");
+    mostrarAviso(data.detail || "No se pudo leer la imagen. Prueba con un JPG o PNG de menos de 10 MB.");
     return;
   }
+  const { productos, hayMas } = paginaDeBusqueda(data.productos);
   pintarTiempos($tiemposBusqueda, data.tiempos);
-  pintarGrilla(data.productos, true);
+  pintarGrilla(productos);
   pintarConsultas($sqlCatalogo, data.consultas);
+  pintarPaginacion(estado.pagina, hayMas);
+}
+
+function cargarVista() {
+  if (!estado.busqueda) return cargarCatalogo();
+  return estado.busqueda.tipo === "texto" ? buscarTexto() : buscarPorArchivo();
 }
 
 function pintarSemilla(p) {
   $semilla.replaceChildren();
-  $semilla.appendChild(imagenProducto(p.imagen, p.nombre));
-  const info = el("div");
+  const marco = el("div", "marco-imagen");
+  marco.appendChild(imagenProducto(p.imagen, p.nombre));
+  const info = el("div", "semilla-info");
   info.appendChild(el("h2", "", p.nombre));
-  const detalles = [
-    formatoPrecio(p.precio),
-    p.rating !== null && p.rating !== undefined ? `★ ${Number(p.rating).toFixed(1)}` : null,
-    p.marca,
-    p.categoria,
-    p.sucursal ? `${p.sucursal.nombre} (${p.sucursal.distrito})` : null,
-    p.distancia_m !== null && p.distancia_m !== undefined ? formatoDistancia(p.distancia_m) : null,
-  ].filter(Boolean).join(" · ");
-  info.appendChild(el("div", "tenue", detalles));
-  info.appendChild(el("p", "", p.descripcion || ""));
-  $semilla.appendChild(info);
+  if (p.marca) info.appendChild(el("span", "marca-producto", p.marca));
+  info.appendChild(nodoRating(p.rating));
+  info.appendChild(nodoPrecio(p.precio, "precio precio-grande"));
+  const ficha = el("dl", "ficha");
+  const agregar = (etiqueta, valor) => {
+    const fila = el("div");
+    fila.appendChild(el("dt", "", etiqueta));
+    const dd = el("dd");
+    dd.append(valor);
+    fila.appendChild(dd);
+    ficha.appendChild(fila);
+  };
+  if (p.categoria) agregar("Categoría", p.categoria);
+  if (p.sucursal) agregar("Tienda", botonTienda(p));
+  info.appendChild(ficha);
+  $semilla.append(marco, info);
+  if (p.descripcion) $semilla.appendChild(el("p", "descripcion", p.descripcion));
 }
 
 const ORDEN_SENALES = ["cocompra", "texto", "metadata", "visual", "espacial"];
 
+const TITULOS_REC = {
+  hibrido: "Recomendados para este producto",
+  cocompra: "Quienes compraron esto también compraron",
+  visual: "Se ven parecidos",
+  texto: "Con una descripción parecida",
+  metadata: "Misma categoría y precio parecido",
+  espacial: "En tiendas cerca de ti",
+};
+
 function leyendaAportes(items) {
   const presentes = ORDEN_SENALES.filter((s) => items.some((i) => i.aportes && i.aportes[s]));
   const leyenda = el("div", "leyenda-aportes");
-  leyenda.appendChild(el("span", "tenue", "Aporte al puntaje:"));
+  leyenda.appendChild(el("span", "tenue", "La franja de color muestra qué pesó en cada recomendación:"));
   for (const senal of presentes) {
     const etiqueta = el("span", "");
     etiqueta.appendChild(el("i", `muestra-senal ${senal}`));
@@ -612,7 +726,9 @@ function barraAportes(item, maxPuntaje) {
 function pintarRecomendaciones(items) {
   $listaRec.replaceChildren();
   if (!items.length) {
-    $listaRec.appendChild(el("p", "vacio", "Sin recomendaciones para los filtros activos."));
+    $listaRec.appendChild(
+      el("p", "vacio", "Ningún producto cumple los filtros activos. Quita la categoría o el rango de precio para ver más.")
+    );
     return;
   }
   const conAportes = items.some((i) => i.aportes);
@@ -620,31 +736,56 @@ function pintarRecomendaciones(items) {
   if (conAportes) $listaRec.appendChild(leyendaAportes(items));
   for (const item of items) {
     const fila = el("article", "rec-item");
-    fila.appendChild(imagenProducto(item.imagen, item.nombre));
-    const cuerpo = el("div");
-    cuerpo.appendChild(el("h4", "", item.nombre));
-    const meta = [
-      formatoPrecio(item.precio),
-      item.rating !== null && item.rating !== undefined ? `★ ${Number(item.rating).toFixed(1)}` : null,
-      item.categoria,
-    ].filter(Boolean).join(" · ");
-    const lineaMeta = el("div", "tenue", meta);
-    if (item.sucursal) lineaMeta.appendChild(botonTienda(item));
-    cuerpo.appendChild(lineaMeta);
-    cuerpo.appendChild(pintarBadges(item));
-    if (item.aportes) cuerpo.appendChild(barraAportes(item, maxPuntaje));
+    const marco = el("div", "marco-imagen");
+    marco.appendChild(imagenProducto(item.imagen, item.nombre));
+    fila.appendChild(marco);
+    const cuerpo = el("div", "rec-cuerpo");
+    const titulo = el("h3");
+    const enlace = el("button", "titulo-producto", item.nombre);
+    enlace.type = "button";
+    titulo.appendChild(enlace);
+    cuerpo.appendChild(titulo);
+    const linea = el("div", "rec-linea");
+    linea.append(nodoPrecio(item.precio), nodoRating(item.rating));
+    cuerpo.appendChild(linea);
+    if (item.cocompras) {
+      cuerpo.appendChild(el("span", "tenue", `Comprado junto ${item.cocompras} ${item.cocompras === 1 ? "vez" : "veces"}`));
+    }
+    if (item.sucursal) cuerpo.appendChild(botonTienda(item));
     fila.appendChild(cuerpo);
+    if (item.aportes) fila.appendChild(barraAportes(item, maxPuntaje));
     fila.addEventListener("click", () => seleccionarProducto(item.id));
     $listaRec.appendChild(fila);
   }
 }
+
+const $vistaDetalle = document.getElementById("vista-detalle");
+const pantallaAngosta = window.matchMedia("(max-width: 960px)");
 
 async function seleccionarProducto(itemId) {
   estado.itemActivo = itemId;
   for (const tarjeta of $grilla.querySelectorAll(".tarjeta")) {
     tarjeta.classList.toggle("seleccionada", tarjeta.dataset.id === String(itemId));
   }
+  // En pantallas angostas el detalle queda debajo de la grilla.
+  if (pantallaAngosta.matches) $vistaDetalle.scrollIntoView({ block: "start" });
   await cargarRecomendaciones();
+}
+
+function deseleccionarProducto() {
+  if (!estado.itemActivo) return;
+  const anterior = $grilla.querySelector(".tarjeta.seleccionada .titulo-producto");
+  estado.itemActivo = null;
+  estado.pedidoRec++; // descarta una respuesta de recomendaciones que siga en camino
+  estado.semillaActual = null;
+  estado.recomendacionesActuales = [];
+  estado.sucursalesKnn = [];
+  for (const tarjeta of $grilla.querySelectorAll(".tarjeta.seleccionada")) tarjeta.classList.remove("seleccionada");
+  $detalleContenido.hidden = true;
+  $detalleVacio.hidden = false;
+  pintarResumenEspacial();
+  actualizarMarcadoresTiendas();
+  if (anterior) anterior.focus();
 }
 
 async function cargarRecomendaciones() {
@@ -654,7 +795,7 @@ async function cargarRecomendaciones() {
   const pedido = ++estado.pedidoRec;
   $detalleVacio.hidden = true;
   $detalleContenido.hidden = false;
-  $pesosPanel.hidden = estado.modoRec !== "hibrido";
+  $tituloRec.textContent = TITULOS_REC[estado.modoRec];
   if (estado.modoRec === "espacial" && !estado.ubicacion) {
     abrirPanelMapa();
     $tiemposRec.replaceChildren();
@@ -663,7 +804,7 @@ async function cargarRecomendaciones() {
     estado.sucursalesKnn = [];
     actualizarMarcadoresTiendas();
     $listaRec.replaceChildren(
-      el("p", "vacio", "Fija tu ubicación en el mapa (o pulsa 'Usar Miraflores') para recomendar por cercanía (R-Tree).")
+      el("p", "vacio", "Elige tu ubicación en el mapa, o pulsa Usar Miraflores, para ver productos de las tiendas más cercanas.")
     );
     const resSemilla = await fetch(`/api/productos/${estado.itemActivo}`);
     if (resSemilla.ok && pedido === estado.pedidoRec) {
@@ -677,6 +818,7 @@ async function cargarRecomendaciones() {
   const params = paramsFiltros();
   params.set("modo", estado.modoRec);
   params.set("k", "10");
+  params.set("visual", estado.modeloVisual);
   if (estado.modoRec === "hibrido") {
     params.set("fusion", estado.fusionRec);
     params.set("w_cocompra", String(estado.pesos.cocompra));
@@ -690,7 +832,7 @@ async function cargarRecomendaciones() {
   const data = await res.json();
   if (pedido !== estado.pedidoRec) return;
   if (!res.ok) {
-    $listaRec.replaceChildren(el("p", "vacio", data.detail || "No se pudo recomendar."));
+    $listaRec.replaceChildren(el("p", "vacio", data.detail || "No se pudieron calcular las recomendaciones. Revisa que el motor BD2 esté encendido."));
     pintarConsultas($sqlRec, []);
     return;
   }
@@ -706,60 +848,66 @@ async function cargarRecomendaciones() {
   actualizarMarcadoresTiendas();
 }
 
+// Un filtro nuevo vuelve a la primera página de lo que se esté viendo (catálogo o búsqueda).
 function recargarVistaActual() {
-  if (estado.archivoBusqueda) {
-    buscarPorArchivo(estado.archivoBusqueda);
-  } else if (estado.busquedaActiva && $consulta.value.trim()) {
-    buscarTexto();
-  } else {
-    estado.pagina = 1;
-    cargarCatalogo();
-  }
+  estado.pagina = 1;
+  cargarVista();
   if (estado.itemActivo) cargarRecomendaciones();
+}
+
+function irAPagina(pagina) {
+  estado.pagina = pagina;
+  cargarVista();
+  $tituloCatalogo.scrollIntoView({ block: "nearest" });
 }
 
 $formBusqueda.addEventListener("submit", (ev) => {
   ev.preventDefault();
-  buscarTexto();
+  const q = $consulta.value.trim();
+  estado.busqueda = q ? { tipo: "texto", q, modo: $modoBusqueda.value } : null;
+  estado.pagina = 1;
+  cargarVista();
+});
+
+$modoBusqueda.addEventListener("change", () => {
+  if (estado.busqueda && estado.busqueda.tipo === "texto") {
+    estado.busqueda.modo = $modoBusqueda.value;
+    recargarVistaActual();
+  }
 });
 
 $limpiarBusqueda.addEventListener("click", () => {
   $consulta.value = "";
-  cargarCatalogo();
+  estado.busqueda = null;
+  recargarVistaActual();
 });
 
+$botonFoto.addEventListener("click", () => $archivoImagen.click());
 $archivoImagen.addEventListener("change", () => {
   if ($archivoImagen.files && $archivoImagen.files[0]) {
-    buscarPorArchivo($archivoImagen.files[0]);
+    estado.busqueda = { tipo: "imagen", archivo: $archivoImagen.files[0] };
+    $consulta.value = "";
     $archivoImagen.value = "";
+    recargarVistaActual();
   }
 });
 
-$aplicarFiltros.addEventListener("click", recargarVistaActual);
-$orden.addEventListener("change", () => {
-  if (!estado.busquedaActiva) {
-    estado.pagina = 1;
-    cargarCatalogo();
-  }
-});
+for (const filtro of [$categoria, $precioMin, $precioMax]) {
+  filtro.addEventListener("change", recargarVistaActual);
+}
+$orden.addEventListener("change", () => irAPagina(1));
 
 $pagAnterior.addEventListener("click", () => {
-  if (estado.pagina > 1) {
-    estado.pagina -= 1;
-    cargarCatalogo();
-  }
+  if (estado.pagina > 1) irAPagina(estado.pagina - 1);
 });
-$pagSiguiente.addEventListener("click", () => {
-  estado.pagina += 1;
-  cargarCatalogo();
-});
+$pagSiguiente.addEventListener("click", () => irAPagina(estado.pagina + 1));
 
 $toggleMapa.addEventListener("click", () => {
   if ($panelMapa.hidden) {
     abrirPanelMapa();
   } else {
     $panelMapa.hidden = true;
-    $toggleMapa.classList.remove("activo");
+    $toggleMapa.setAttribute("aria-expanded", "false");
   }
 });
 
@@ -795,8 +943,30 @@ $modosRec.addEventListener("click", (ev) => {
   estado.modoRec = btn.dataset.modo;
   for (const b of $modosRec.querySelectorAll("button")) {
     b.classList.toggle("activo", b === btn);
+    b.setAttribute("aria-checked", String(b === btn));
   }
+  $pesosPanel.hidden = estado.modoRec !== "hibrido";
+  $resumenEstrategia.textContent = btn.textContent;
   cargarRecomendaciones();
+});
+
+$cerrarDetalle.addEventListener("click", deseleccionarProducto);
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape" || ev.defaultPrevented) return;
+  // Con las preferencias abiertas, Esc solo las cierra (lo hace el navegador por ser popover).
+  if ($preferencias.matches(":popover-open")) return;
+  // En el buscador, Esc borra el texto; no debe cerrar además el producto.
+  if (ev.target.matches("input[type='search']")) return;
+  deseleccionarProducto();
+});
+
+// El popover vive en la capa superior (encima del mapa); se ancla bajo el engranaje de la banda.
+$preferencias.addEventListener("beforetoggle", (ev) => {
+  if (ev.newState !== "open") return;
+  const caja = $botonPreferencias.getBoundingClientRect();
+  $preferencias.style.top = `${caja.bottom + 8}px`;
+  $preferencias.style.right = `${Math.max(8, window.innerWidth - caja.right)}px`;
 });
 
 for (const slider of $pesosPanel.querySelectorAll("input[type='range']")) {
@@ -813,5 +983,13 @@ $fusionRec.addEventListener("change", () => {
   cargarRecomendaciones();
 });
 
+$modeloVisual.addEventListener("change", () => {
+  estado.modeloVisual = $modeloVisual.value;
+  NOMBRES_SENAL.visual = `Imagen (${$modeloVisual.selectedOptions[0].textContent})`;
+  if (estado.busqueda && estado.busqueda.tipo === "imagen") recargarVistaActual();
+  else if (estado.itemActivo) cargarRecomendaciones();
+});
+
+hidratarIconos();
 actualizarControlEspacial();
 Promise.all([cargarEstado(), cargarCategorias(), cargarSucursales()]).then(cargarCatalogo);

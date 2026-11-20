@@ -1,0 +1,4 @@
+# Opcional: modelo visual CLIP en CPU (sin GPU). torch desde el índice CPU para no bajar CUDA.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+open_clip_torch==4.2.2

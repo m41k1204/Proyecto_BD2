@@ -1,5 +1,6 @@
 import contextvars
 import math
+import re
 import time
 from contextlib import contextmanager
 
@@ -87,13 +88,26 @@ def ejecutar(sql):
     return datos
 
 
+_PATRON_VECTOR = re.compile(r"VECTOR\(([^()]*)\)")
+
+
+def _abreviar_vectores(sql):
+    """El visor muestra 'VECTOR(a, b, c, … 4096 valores)' en vez de miles de números."""
+    def corto(m):
+        valores = m.group(1).split(", ")
+        if len(valores) <= 8:
+            return m.group(0)
+        return f"VECTOR({', '.join(valores[:3])}, … {len(valores)} valores)"
+    return _PATRON_VECTOR.sub(corto, sql)
+
+
 def filas(sql):
     t0 = time.perf_counter()
     datos = ejecutar(sql)
     lista = _consultas.get()
     if lista is not None:
         lista.append({
-            "sql": sql,
+            "sql": _abreviar_vectores(sql),
             "plan": datos.get("plan", []),
             "ms_motor": datos.get("elapsedMs"),
             "ms_total": round((time.perf_counter() - t0) * 1000, 1),

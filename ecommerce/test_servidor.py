@@ -93,7 +93,8 @@ def main():
             with patch("servidor.CARPETA_MULTIMEDIA", media), \
                     patch("cliente_bd.ejecutar", side_effect=ejecutar_local), \
                     patch("cliente_bd.cargar_caracteristicas", side_effect=cargar_feat_local), \
-                    patch("cliente_bd.disponible", return_value=True):
+                    patch("cliente_bd.disponible", return_value=True), \
+                    patch("cliente_bd.tablas", side_effect=lambda: [{"name": n} for n in catalogo_bd]):
                 ingesta.cargar(productos, ordenes)
                 client = TestClient(servidor.app)
 
@@ -105,6 +106,7 @@ def main():
                 est = r_estado.json()
                 assert est["extractor"] == config.DESCRIPTOR_VISUAL and est["dimension"] == 256
                 assert est["productos"] == 3 and est["ordenes"] == 4
+                assert est["modelos_visuales"] == ["sift256"]  # sin tablas vis_* cargadas
 
                 assert len(client.get("/api/sucursales").json()) == 8
                 assert len(client.get("/api/categorias").json()) == 2
@@ -181,6 +183,9 @@ def main():
                 assert client.get("/api/productos/1/recomendaciones", params={"modo": "malo"}).status_code == 400
                 assert client.get("/api/productos/1/recomendaciones", params={"modo": "hibrido", "fusion": "malo"}).status_code == 400
                 assert client.get("/api/productos/999/recomendaciones").status_code == 404
+                assert client.get("/api/productos/1/recomendaciones", params={"visual": "malo"}).status_code == 400
+                r_vis = client.get("/api/productos/1/recomendaciones", params={"modo": "visual", "visual": "sift256"})
+                assert r_vis.status_code == 200 and r_vis.json()["recomendaciones"]
 
                 assert client.get("/api/buscar", params={"q": "wireless", "modo": "bm25"}).status_code == 200
                 assert client.get("/api/buscar", params={"q": "wireless", "modo": "tf_idf"}).status_code == 200
@@ -207,6 +212,12 @@ def main():
                     "/api/buscar/imagen",
                     files={"archivo": ("foto.jpg", img_bytes, "image/jpeg")},
                     data={"precio_min": "-5"},
+                ).status_code == 400
+
+                assert client.post(
+                    "/api/buscar/imagen",
+                    files={"archivo": ("foto.jpg", img_bytes, "image/jpeg")},
+                    data={"visual": "malo"},
                 ).status_code == 400
 
             with patch("cliente_bd.disponible", return_value=False):

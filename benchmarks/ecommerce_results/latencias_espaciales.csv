@@ -1,4 +1,4 @@
 operacion,repeticiones,ms_promedio,ms_p95
-RTREE-radius,40,3.8,4.4
-RTREE-knn,40,3.57,4.25
-RTREE-polygon,40,3.83,4.77
+RTREE-radius,40,3.21,4.5
+RTREE-knn,40,2.98,3.04
+RTREE-polygon,40,3.25,4.07
