@@ -69,6 +69,13 @@ def test_coincidencias():
     # Sin ventanas no hay mejor coincidencia
     assert coincidencias(*consulta, np.empty(0), np.empty((3, 0)))["mejor"] is None
 
+def test_otra_mas_larga():
+    # La otra canción tiene más ventanas (8) que la consulta (4): igual se comparan todas las parejas.
+    # Sus primeros 30 s solo tienen la palabra 0, que la consulta no usa: similitud 0, no 1
+    consulta = ventanas([1] * 10 + [2] * 10, ventana=5, paso=5)
+    otra = ventanas([0] * 30 + [2] * 10, ventana=5, paso=5)
+    resultado = coincidencias(*consulta, *otra, ventana=5)
+    assert [v["similitud"] for v in resultado["ventanas"]] == [0, 0, 0, 0, 0, 0, 1, 1]
 
 def test_silencio():
     # Una ventana cuyas palabras no tienen peso (vector en ceros) no rompe el cálculo: cuenta como 0
@@ -79,10 +86,20 @@ def test_silencio():
     assert all(v["similitud"] == 0 for v in resultado["ventanas"])
 
 
+def test_otra_mas_larga():
+    # La otra canción tiene más ventanas (8) que la consulta (4): igual se comparan todas las parejas.
+    # Sus primeros 30 s solo tienen la palabra 0, que la consulta no usa: similitud 0, no 1
+    consulta = ventanas([1] * 10 + [2] * 10, ventana=5, paso=5)
+    otra = ventanas([0] * 30 + [2] * 10, ventana=5, paso=5)
+    resultado = coincidencias(*consulta, *otra, ventana=5)
+    assert [v["similitud"] for v in resultado["ventanas"]] == [0, 0, 0, 0, 0, 0, 1, 1]
+
 if __name__ == "__main__":
     test_ventanas()
     print("OK: ventanas de tiempo")
     test_coincidencias()
     print("OK: coincidencias entre tramos")
+    test_otra_mas_larga()
+    print("OK: canción más larga que la consulta")
     test_silencio()
     print("OK: ventanas en silencio")
