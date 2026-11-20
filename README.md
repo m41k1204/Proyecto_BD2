@@ -63,6 +63,21 @@ docker compose up --build
 
 Abre <http://localhost:8080>. Los CSV de demo se generan solos en `data/demo/`; impórtalos desde el panel **Archivos**.
 
+Las aplicaciones de la Parte 5 son profiles del mismo `docker-compose.yml` (`rag`, `ecommerce` y `rostros`). Para levantar todo junto:
+
+```bash
+docker compose --profile "*" up -d --build
+```
+
+| Servicio | URL |
+|---|---|
+| Motor y frontend | <http://localhost:8080> |
+| RAG SciELO | <http://localhost:8100> |
+| Reconocimiento facial | <http://localhost:8200> |
+| Tienda | <http://localhost:8300> |
+
+Cada aplicación necesita cargar sus datos una vez; los pasos están en su README ([`rag`](rag/README.md), [`ecommerce`](ecommerce/README.md), [`rostros`](rostros/README.md)).
+
 Para desarrollo sin Docker:
 
 > [!NOTE]

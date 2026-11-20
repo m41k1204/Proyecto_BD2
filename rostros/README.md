@@ -74,6 +74,20 @@ Solo se pueden modificar las personas con origen `propia`; LFW queda intacto.
 
 `pnpm dev` levanta todo junto con `mprocs`.
 
+### Con Docker
+
+El servicio y Redis son el profile `rostros` del `docker-compose.yml` y usan el motor general (`backend`).
+
+```bash
+docker compose --profile rostros up -d --build
+docker compose --profile rostros run --rm rostros python ingesta.py
+```
+
+- Al arrancar, el contenedor descarga los modelos en `data/rostros/modelos/` si no están.
+- La ingesta descarga LFW y carga las tablas en el volumen `runtime` del motor, así que se corre una vez.
+- El puerto 8200 queda abierto a la red local para que la app de Expo Go lo alcance. La app sigue fuera de
+  Docker: `pnpm dev:rostros-app`.
+
 ### Si la app no se conecta
 
 - La app arma la URL del servicio con la IP de la laptop que Expo Go ya conoce (`http://<ip>:8200`).
