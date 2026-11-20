@@ -14,7 +14,9 @@
     "setup:rostros": "uv venv rostros/.venv --python 3.12 && uv pip install --python rostros/.venv/bin/python -r rostros/requirements.txt",
     "dev:redis": "docker run --rm --name bd2-redis -p 127.0.0.1:6379:6379 redis:7-alpine",
     "dev:rostros": "cd rostros && .venv/bin/uvicorn servidor:app --host 0.0.0.0 --port 8200",
-    "dev:rostros-app": "pnpm --dir rostros/app start"
+    "dev:rostros-app": "pnpm --dir rostros/app start",
+    "setup:ecommerce": "uv venv ecommerce/.venv --python 3.12 && uv pip install --python ecommerce/.venv/bin/python -r ecommerce/requirements.txt",
+    "dev:ecommerce": "cd ecommerce && .venv/bin/uvicorn servidor:app --port 8300"
   },
   "devDependencies": {
     "mprocs": "^0.9.6"

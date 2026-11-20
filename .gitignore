@@ -41,3 +41,6 @@ rag/.env
 
 # App de rostros: entorno local
 rostros/.venv
+
+# App E-commerce: entorno local
+ecommerce/.venv

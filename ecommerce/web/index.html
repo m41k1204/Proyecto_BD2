@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tienda Multimodal · BD2</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="barra">
+    <div class="marca">
+      <strong>MiniTienda BD2</strong>
+      <span id="estado" class="estado">conectando…</span>
+    </div>
+    <form id="form-busqueda" class="busqueda">
+      <input id="consulta" type="search" placeholder="Buscar productos por texto (SPIMI)…" autocomplete="off">
+      <select id="modo-busqueda" aria-label="Modo de búsqueda">
+        <option value="bm25">BM25 (SPIMI)</option>
+        <option value="tf_idf">TF-IDF (SPIMI)</option>
+      </select>
+      <button type="submit" class="primario">Buscar</button>
+      <label class="boton-archivo">
+        Buscar por foto (SIFT)
+        <input id="archivo-imagen" type="file" accept="image/*" hidden>
+      </label>
+      <button type="button" id="limpiar-busqueda" class="secundario" hidden>Limpiar</button>
+    </form>
+  </header>
+
+  <section class="filtros">
+    <label class="campo">Categoría
+      <select id="categoria"><option value="">Todas</option></select>
+    </label>
+    <label class="campo">Precio mín
+      <input id="precio-min" type="number" min="0" step="1" placeholder="0">
+    </label>
+    <label class="campo">máx
+      <input id="precio-max" type="number" min="0" step="1" placeholder="∞">
+    </label>
+    <label class="campo">Orden
+      <select id="orden">
+        <option value="rating">Mejor rating</option>
+        <option value="precio_asc">Menor precio</option>
+        <option value="precio_desc">Mayor precio</option>
+        <option value="id">ID</option>
+        <option value="cercania" disabled>Más cercanos (R-Tree)</option>
+      </select>
+    </label>
+    <button type="button" id="aplicar-filtros" class="secundario">Aplicar</button>
+    <button type="button" id="toggle-mapa" class="secundario">Mapa de tiendas (R-Tree)</button>
+    <span id="resumen-espacial" class="tenue"></span>
+  </section>
+
+  <section id="panel-mapa" class="panel-mapa" hidden>
+    <div class="mapa-controles">
+      <span>Haz clic en el mapa para fijar tu ubicación: el R-Tree filtra por radio y prioriza tiendas cercanas (k-NN) en las recomendaciones:</span>
+      <label class="campo">Radio
+        <select id="radio">
+          <option value="">Sin límite</option>
+          <option value="3000">3 km</option>
+          <option value="6000" selected>6 km</option>
+          <option value="12000">12 km</option>
+        </select>
+      </label>
+      <button type="button" id="ubicacion-demo" class="secundario">Usar Miraflores</button>
+      <button type="button" id="limpiar-ubicacion" class="secundario">Quitar ubicación</button>
+      <button type="button" id="filtrar-zona" class="secundario">Filtrar zona visible (R-Tree)</button>
+      <button type="button" id="quitar-zona" class="secundario" hidden>Quitar zona</button>
+    </div>
+    <div id="mapa" class="mapa"></div>
+    <div class="mapa-leyenda">
+      <span><i class="punto-leyenda usuario"></i>Tu ubicación</span>
+      <span><i class="punto-leyenda top10"></i>Tiendas con Top 10</span>
+      <span><i class="punto-leyenda semilla"></i>Producto seleccionado</span>
+      <span><i class="punto-leyenda knn"></i>Cercanas k-NN (R-Tree)</span>
+      <span><i class="punto-leyenda otra"></i>Otras tiendas</span>
+      <span><i class="punto-leyenda zona"></i>Zona filtrada (polygon)</span>
+    </div>
+  </section>
+
+  <main class="tienda">
+    <section class="catalogo-panel">
+      <div class="cabecera-seccion">
+        <h1 id="titulo-catalogo">Catálogo</h1>
+        <div id="tiempos-busqueda" class="tiempos"></div>
+      </div>
+      <div id="aviso" class="aviso" hidden></div>
+      <div id="grilla" class="grilla"></div>
+      <div id="paginacion" class="paginacion">
+        <button type="button" id="pag-anterior" class="secundario">← Anterior</button>
+        <span id="pag-info" class="tenue">Página 1</span>
+        <button type="button" id="pag-siguiente" class="secundario">Siguiente →</button>
+      </div>
+      <details id="sql-catalogo" class="panel-sql" hidden>
+        <summary>SQL y planes del motor BD2</summary>
+        <div class="lista-sql"></div>
+      </details>
+    </section>
+
+    <aside id="vista-detalle" class="detalle-panel">
+      <div id="detalle-vacio" class="vacio">
+        Selecciona un producto del catálogo para ver su detalle y el <strong>Top 10 de recomendaciones híbridas</strong>.
+      </div>
+      <div id="detalle-contenido" hidden>
+        <div id="semilla" class="semilla"></div>
+
+        <div class="rec-cabecera">
+          <h2>Top 10 Recomendaciones</h2>
+          <div id="modos-rec" class="segmentado" role="radiogroup" aria-label="Estrategia de recomendación">
+            <button type="button" data-modo="hibrido" class="activo">Híbrido</button>
+            <button type="button" data-modo="cocompra">Co-compra</button>
+            <button type="button" data-modo="visual">Visual</button>
+            <button type="button" data-modo="texto">Texto</button>
+            <button type="button" data-modo="metadata">Metadata</button>
+            <button type="button" data-modo="espacial">Cercanos</button>
+          </div>
+        </div>
+
+        <div id="pesos-panel" class="pesos">
+          <label class="campo-fusion">Fusión
+            <select id="fusion-rec">
+              <option value="score" selected>Scores normalizados</option>
+              <option value="rrf">RRF (ranking)</option>
+            </select>
+          </label>
+          <label>Co-compra <input type="range" min="0" max="1" step="0.05" value="0.55" data-peso="cocompra"> <span id="val-cocompra">0.55</span></label>
+          <label>Texto <input type="range" min="0" max="1" step="0.05" value="0.25" data-peso="texto"> <span id="val-texto">0.25</span></label>
+          <label>Metadata <input type="range" min="0" max="1" step="0.05" value="0.12" data-peso="metadata"> <span id="val-metadata">0.12</span></label>
+          <label>Visual <input type="range" min="0" max="1" step="0.05" value="0.08" data-peso="visual"> <span id="val-visual">0.08</span></label>
+          <label id="campo-peso-espacial" class="peso-espacial deshabilitado" title="Fija tu ubicación en el mapa para activar">Cercanía (R-Tree) <input type="range" min="0" max="1" step="0.05" value="0.10" data-peso="espacial" disabled> <span id="val-espacial">0.10</span></label>
+        </div>
+
+        <div id="tiempos-rec" class="tiempos"></div>
+        <div id="lista-recomendaciones" class="lista-rec"></div>
+        <details id="sql-rec" class="panel-sql" hidden>
+          <summary>SQL y planes del motor BD2</summary>
+          <div class="lista-sql"></div>
+        </details>
+      </div>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
