@@ -15,6 +15,7 @@ from engine.catalog import STRLEN, StorageTable, tabla_que_choca
 from engine.importer import ID_SERIAL, CSVImportError, agregar_id, parse_csv
 from engine.multimedia.pipeline import FeaturePipeline
 from engine.multimedia.previsualizacion import FormatoNoPrevisualizable, archivo_previsualizable
+from engine.multimedia.coincidencias import comparar_audios
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DIR = os.path.dirname(BACKEND_DIR)
@@ -45,6 +46,14 @@ class QueryBody(BaseModel):
 class FeaturesBody(BaseModel):
     path_column: str
     descriptor_id: str
+
+
+class CoincidenciasBody(BaseModel):
+    tabla: str
+    consulta: str
+    rutas: list[str] = Field(min_length=1, max_length=20)
+    ventana: float = Field(default=5.0, gt=0, le=60)
+    paso: float = Field(default=2.5, gt=0, le=60)
 
 
 def _tipo(sentencia):
@@ -104,6 +113,16 @@ def archivo_multimedia(ruta: str):
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
     return FileResponse(completa, media_type=tipo)
+
+
+@app.post("/api/multimedia/coincidencias")
+def coincidencias_audio(body: CoincidenciasBody):
+    if body.tabla not in catalog:
+        raise HTTPException(status_code=404, detail=f"la tabla '{body.tabla}' no existe")
+    try:
+        return comparar_audios(multimedia, catalog[body.tabla], body.consulta, body.rutas, body.ventana, body.paso)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
 
 @app.get("/api/tables")
