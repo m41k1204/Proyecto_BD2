@@ -69,6 +69,28 @@ services:
       - backend-ecommerce
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    profiles: ["rostros"]
+    restart: unless-stopped
+
+  rostros:
+    build:
+      context: .
+      dockerfile: rostros/Dockerfile
+    profiles: ["rostros"]
+    environment:
+      BD2_URL: http://backend:8000
+      ROSTROS_REDIS: redis://redis:6379/0
+    volumes:
+      - ./data/rostros:/app/data/rostros
+    ports:
+      - "8200:8200"
+    depends_on:
+      - backend
+      - redis
+    restart: unless-stopped
+
 volumes:
   runtime:
   runtime_ecommerce:

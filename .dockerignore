@@ -13,3 +13,6 @@ data/rag
 rag/.env
 data/ecommerce
 data/runtime_ecommerce
+data/rostros
+rostros/app
+**/node_modules
