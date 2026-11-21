@@ -94,6 +94,11 @@ Tres servicios aparte que solo hablan con el motor por `POST /api/query`:
 | 🙂 [Reconocimiento facial](rostros/README.md) | App móvil que reconoce caras en tiempo real con YuNet y ArcFace | HNSW coseno sobre 13 233 rostros de LFW, transacciones, caché Redis |
 | 🛒 [Tienda con recomendaciones](ecommerce/README.md) | Catálogo que recomienda productos y sucursales cercanas | `JOIN` + `GROUP BY` (co-compra), BM25, HNSW visual y R-Tree |
 
+<div align="center">
+<img src="documents/capturas/rag_chat.png" alt="Chat del RAG SciELO con una respuesta citada y el panel de fuentes" width="860">
+<br><sub>RAG SciELO: respuesta con citas [n] y, a la derecha, los fragmentos recuperados con su posición en BM25 y en embeddings</sub>
+</div>
+
 ## Inicio rápido
 
 Con [Docker](https://docs.docker.com/get-docker/) basta un comando:
