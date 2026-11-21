@@ -1,10 +1,12 @@
+import os
 import csv
 import json
 import time
 import urllib.request
 from pathlib import Path
 
-API = "http://localhost:8000"
+# con docker compose el backend no publica el 8000: usar BD2_URL=http://localhost:8080 (nginx reenvía /api)
+API = os.environ.get("BD2_URL", "http://localhost:8000")
 RAIZ = Path(__file__).resolve().parent.parent
 MULTIMEDIA = RAIZ / "data" / "multimedia"
 MANIFIESTO = MULTIMEDIA / "audio" / "fma_small" / "manifest.csv"
