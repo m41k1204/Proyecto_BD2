@@ -264,6 +264,16 @@ Proyecto_BD2/
 └── docs/                    esta documentación
 ```
 
+## Integrantes
+
+| Integrante | Código | GitHub |
+|---|---|---|
+| Olivares Sarmiento, Javier Ignacio Leon | 202310689 | [@Javier1308](https://github.com/Javier1308) |
+| Martínez Olivos, Félix Alberto | 202310685 | [@flxamartinez](https://github.com/flxamartinez) |
+| Vargas Urmeneta, Gabriel | 202310129 | [@gab-o-11](https://github.com/gab-o-11) · [@MrGabo386](https://github.com/MrGabo386) |
+| Hinojosa Bittrich, Michael Paul | 202310528 | [@m41k1204](https://github.com/m41k1204) |
+| Soto Cristobal, Camilo Ernesto | 202210484 | [@Snah-s](https://github.com/Snah-s) |
+
 ---
 
 <div align="center">
